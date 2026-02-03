@@ -12,8 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-.github/workflows/dev_issues.yaml
-rust/Cargo.toml
-rust/README.md
-rust/src/lib.rs
-rust/tests/test_datafusion.rs
+target/

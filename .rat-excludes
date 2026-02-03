@@ -13,3 +13,5 @@
 # limitations under the License.
 
 rust/license.tpl
+rust/pixi.lock
+rust/Cargo.lock

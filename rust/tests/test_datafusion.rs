@@ -21,7 +21,7 @@
 // under the License.
 
 use adbc_core::{Connection, Database, Driver, Optionable, Statement};
-use adbc_datafusion::{DataFusionConnection, DataFusionDriver};
+use adbc_driver_datafusion::{DataFusionConnection, DataFusionDriver};
 use arrow_array::RecordBatch;
 use datafusion::prelude::*;
 

@@ -1,0 +1,108 @@
+# Copyright (c) 2025 ADBC Drivers Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#         http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# !!!! AUTO-GENERATED FILE.  DO NOT EDIT. !!!!
+# USE adbc-gen-workflow (see adbc-drivers/dev) TO UPDATE THIS FILE.
+
+# This is a common workflow for testing a PR when permissions are needed.
+
+name: Go Test PR
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "The ID of the PR to test (e.g. 42)"
+        required: true
+        type: string
+      ref:
+        description: "The commit/ref to checkout"
+        required: true
+        type: string
+
+concurrency:
+  group: ${{ github.repository }}-${{ github.workflow }}-${{ inputs.pr }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+  packages: read
+  pull-requests: read
+
+jobs:
+  setup:
+    name: configure job
+    runs-on: ubuntu-slim
+    outputs:
+      repository: ${{ steps.get_repo.outputs.repository }}
+    steps:
+      - name: get repository
+        id: get_repo
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo repository=$(gh pr --repo ${{ github.repository }} view ${{ inputs.pr }} --json headRepository,headRepositoryOwner --jq '"\(.headRepositoryOwner.login)/\(.headRepository.name)"') | tee -a $GITHUB_OUTPUT
+
+      - name: set job summary
+        run: |
+          echo "**PR:** https://github.com/${{ github.repository }}/pull/${{ inputs.pr }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Remote:** ${{ steps.get_repo.outputs.repository }}@${{ inputs.ref }}" >> $GITHUB_STEP_SUMMARY
+
+  test:
+    uses: adbc-drivers/datafusion/.github/workflows/go_test.yaml@main
+    needs:
+      - setup
+    with:
+      repository: ${{ needs.setup.outputs.repository }}
+      ref: ${{ inputs.ref }}
+    secrets:
+      # https://github.com/orgs/community/discussions/25238#discussioncomment-3247035
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  report:
+    name: comment on PR
+    runs-on: ubuntu-slim
+    if: ${{ always() }}
+    needs:
+      - setup
+      - test
+    permissions:
+      actions: read
+      pull-requests: write
+    steps:
+      - id: get_run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo workflow_run_url=$(gh run --repo ${{ github.repository }} view ${{ github.run_id }} --json url --jq '.url') | tee -a $GITHUB_OUTPUT
+          if [[ '${{ needs.test.result }}' == 'success' ]]; then
+            echo message=":heavy_check_mark: **Test passed:** " | tee -a $GITHUB_OUTPUT
+          else
+            echo message=":x: **Test failed:** " | tee -a $GITHUB_OUTPUT
+          fi
+
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v8.0.0
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            github.rest.issues.createComment({
+              issue_number: ${{ inputs.pr }},
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '${{ steps.get_run.outputs.message }} ${{ needs.setup.outputs.repository }}@${{ inputs.ref }}\nWorkflow run: ${{ steps.get_run.outputs.workflow_run_url }}'
+            })

@@ -1,3 +1,4 @@
+#:schema https://raw.githubusercontent.com/adbc-drivers/dev/refs/heads/main/schema/generate-schema.json
 # Copyright (c) 2026 ADBC Drivers Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,8 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-.github/workflows/dev_issues.yaml
-rust/Cargo.toml
-rust/README.md
-rust/src/lib.rs
-rust/tests/test_datafusion.rs
+driver = "datafusion"
+private = false
+
+[lang]
+rust = true
+
+[secrets]
+# so we can use gh CLI to download protoc without rate limits
+GH_TOKEN = { secret = "GITHUB_TOKEN", contexts = ["build:test", "build:release"] }
