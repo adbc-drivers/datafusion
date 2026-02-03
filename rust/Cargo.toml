@@ -23,6 +23,7 @@
 [package]
 name = "adbc-driver-datafusion"
 description = "ADBC driver for Apache DataFusion"
+license = "Apache-2.0"
 version = "0.1.0"
 edition = "2024"
 
