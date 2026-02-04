@@ -34,13 +34,9 @@ use std::future::Future;
 use std::sync::Arc;
 use std::vec::IntoIter;
 
-use arrow_array::builder::{
-    BooleanBuilder, Int32Builder, Int64Builder, ListBuilder, MapBuilder, MapFieldNames,
-    StringBuilder, UInt32Builder,
-};
 use arrow_array::{
     ArrayRef, BooleanArray, Int16Array, Int32Array, ListArray, RecordBatch, RecordBatchReader,
-    StringArray, StructArray, UnionArray,
+    StringArray, StructArray,
 };
 use arrow_buffer::{OffsetBuffer, ScalarBuffer};
 use arrow_schema::{ArrowError, DataType, Field, SchemaRef};
@@ -53,6 +49,90 @@ use adbc_core::{
     },
     schemas,
 };
+
+use driverbase::error::ErrorHelper as _;
+
+#[derive(Clone, Copy, Debug)]
+pub struct ErrorHelper {}
+
+impl driverbase::error::ErrorHelper for ErrorHelper {
+    const NAME: &'static str = "datafusion";
+}
+
+type DriverError = driverbase::error::Error<ErrorHelper>;
+
+impl ErrorHelper {
+    fn from_datafusion(err: datafusion::error::DataFusionError) -> DriverError {
+        match err {
+            datafusion::error::DataFusionError::ArrowError(arrow_error, _) => {
+                Self::from_arrow(*arrow_error)
+            }
+            datafusion::error::DataFusionError::ParquetError(parquet_error) => {
+                Self::io().message(parquet_error.to_string())
+            }
+            datafusion::error::DataFusionError::AvroError(error) => {
+                Self::io().message(error.to_string())
+            }
+            datafusion::error::DataFusionError::ObjectStore(error) => {
+                Self::io().message(error.to_string())
+            }
+            datafusion::error::DataFusionError::IoError(error) => {
+                Self::io().message(error.to_string())
+            }
+            datafusion::error::DataFusionError::SQL(parser_error, _) => {
+                ErrorHelper::invalid_argument().message(parser_error.to_string())
+            }
+            datafusion::error::DataFusionError::NotImplemented(message) => {
+                Self::not_implemented().message(message)
+            }
+            datafusion::error::DataFusionError::Internal(message) => {
+                Self::internal_no_location().message(message)
+            }
+            datafusion::error::DataFusionError::Plan(message) => {
+                Self::invalid_argument().message(message)
+            }
+            datafusion::error::DataFusionError::Configuration(message) => {
+                Self::invalid_argument().message(message)
+            }
+            datafusion::error::DataFusionError::SchemaError(schema_error, _) => {
+                Self::invalid_argument().message(schema_error.to_string())
+            }
+            datafusion::error::DataFusionError::Execution(message) => {
+                Self::invalid_argument().message(message)
+            }
+            datafusion::error::DataFusionError::ExecutionJoin(join_error) => {
+                Self::internal_no_location().message(join_error.to_string())
+            }
+            datafusion::error::DataFusionError::ResourcesExhausted(message) => {
+                Self::internal_no_location().message(message)
+            }
+            datafusion::error::DataFusionError::External(error) => {
+                Self::unknown().message(error.to_string())
+            }
+            datafusion::error::DataFusionError::Context(context, data_fusion_error) => {
+                Self::from_datafusion(*data_fusion_error).context(context)
+            }
+            datafusion::error::DataFusionError::Substrait(message) => {
+                Self::internal_no_location().message(message)
+            }
+            datafusion::error::DataFusionError::Diagnostic(_diagnostic, data_fusion_error) => {
+                // TODO: process diagnostic (we need the source query though)
+                Self::from_datafusion(*data_fusion_error)
+            }
+            datafusion::error::DataFusionError::Collection(data_fusion_errors) => {
+                Self::from_all(data_fusion_errors.into_iter().map(Self::from_datafusion))
+                    .unwrap_or(Self::unknown().message("unknown error"))
+            }
+            datafusion::error::DataFusionError::Shared(error) => {
+                // Can't clone the error...
+                Self::internal_no_location().message(error.to_string())
+            }
+            datafusion::error::DataFusionError::Ffi(message) => {
+                ErrorHelper::internal_no_location().message(message)
+            }
+        }
+    }
+}
 
 pub enum Runtime {
     Handle(tokio::runtime::Handle),
@@ -357,100 +437,6 @@ impl Optionable for DataFusionConnection {
     }
 }
 
-struct GetInfoBuilder {
-    name_builder: UInt32Builder,
-    type_id_vec: Vec<i8>,
-    offsets_vec: Vec<i32>,
-    string_array_builder: StringBuilder,
-    string_offset: i32,
-    bool_array_builder: BooleanBuilder,
-    bool_offset: i32,
-    int64_array_builder: Int64Builder,
-    // int64_offset: i32,
-    int32_array_builder: Int32Builder,
-    // int32_offset: i32,
-    list_string_array_builder: ListBuilder<StringBuilder>,
-    // list_string_offset: i32,
-    map_builder: MapBuilder<Int32Builder, ListBuilder<Int32Builder>>,
-    // map_offset: i32,
-}
-
-impl GetInfoBuilder {
-    pub fn new() -> GetInfoBuilder {
-        GetInfoBuilder {
-            name_builder: UInt32Builder::new(),
-            type_id_vec: vec![],
-            offsets_vec: vec![],
-            string_array_builder: StringBuilder::new(),
-            string_offset: 0,
-            bool_array_builder: BooleanBuilder::new(),
-            bool_offset: 0,
-            int64_array_builder: Int64Builder::new(),
-            // int64_offset: 0,
-            int32_array_builder: Int32Builder::new(),
-            // int32_offset: 0,
-            list_string_array_builder: ListBuilder::new(StringBuilder::new()),
-            // list_string_offset: 0,
-            map_builder: MapBuilder::new(
-                Some(MapFieldNames {
-                    entry: "entries".to_string(),
-                    key: "key".to_string(),
-                    value: "value".to_string(),
-                }),
-                Int32Builder::new(),
-                ListBuilder::new(Int32Builder::new()),
-            ),
-            // map_offset: 0,
-        }
-    }
-
-    pub fn set_string(&mut self, code: InfoCode, string: &str) {
-        self.name_builder.append_value(Into::<u32>::into(&code));
-        self.string_array_builder.append_value(string);
-        self.type_id_vec.push(0);
-        self.offsets_vec.push(self.string_offset);
-        self.string_offset += 1;
-    }
-
-    pub fn set_bool(&mut self, code: InfoCode, bool: bool) {
-        self.name_builder.append_value(Into::<u32>::into(&code));
-        self.bool_array_builder.append_value(bool);
-        self.type_id_vec.push(1);
-        self.offsets_vec.push(self.bool_offset);
-        self.bool_offset += 1;
-    }
-
-    pub fn finish(mut self) -> Result<RecordBatch> {
-        let fields = match schemas::GET_INFO_SCHEMA
-            .field_with_name("info_value")
-            .unwrap()
-            .data_type()
-        {
-            DataType::Union(fields, _) => Some(fields),
-            _ => None,
-        };
-
-        let value_array = UnionArray::try_new(
-            fields.unwrap().clone(),
-            self.type_id_vec.into_iter().collect::<ScalarBuffer<i8>>(),
-            Some(self.offsets_vec.into_iter().collect::<ScalarBuffer<i32>>()),
-            vec![
-                Arc::new(self.string_array_builder.finish()),
-                Arc::new(self.bool_array_builder.finish()),
-                Arc::new(self.int64_array_builder.finish()),
-                Arc::new(self.int32_array_builder.finish()),
-                Arc::new(self.list_string_array_builder.finish()),
-                Arc::new(self.map_builder.finish()),
-            ],
-        )?;
-
-        Ok(RecordBatch::try_new(
-            schemas::GET_INFO_SCHEMA.clone(),
-            vec![Arc::new(self.name_builder.finish()), Arc::new(value_array)],
-        )?)
-    }
-}
-
 struct GetObjectsBuilder {
     catalog_names: Vec<String>,
     catalog_db_schema_offsets: Vec<i32>,
@@ -727,6 +713,21 @@ impl GetObjectsBuilder {
     }
 }
 
+static INFO_CODES: std::sync::OnceLock<driverbase::InfoRegistry> = std::sync::OnceLock::new();
+
+fn get_info_codes() -> &'static driverbase::InfoRegistry {
+    INFO_CODES.get_or_init(|| {
+        let mut registry = driverbase::InfoRegistry::new();
+        registry.add_string(
+            InfoCode::DriverName,
+            "ADBC Driver Foundry Driver for Apache DataFusion",
+        );
+        registry.add_string(InfoCode::VendorName, "Apache DataFusion");
+        registry.add_string(InfoCode::VendorVersion, datafusion::DATAFUSION_VERSION);
+        registry
+    })
+}
+
 impl Connection for DataFusionConnection {
     type StatementType = DataFusionStatement;
 
@@ -749,19 +750,8 @@ impl Connection for DataFusionConnection {
         &self,
         codes: Option<std::collections::HashSet<adbc_core::options::InfoCode>>,
     ) -> Result<impl RecordBatchReader + Send> {
-        let mut get_info_builder = GetInfoBuilder::new();
-
-        codes.unwrap().into_iter().for_each(|f| match f {
-            InfoCode::DriverName => get_info_builder.set_string(f, "ADBCDataFusion"),
-            InfoCode::VendorName => get_info_builder.set_string(f, "DataFusion"),
-            InfoCode::VendorSql => get_info_builder.set_bool(f, true),
-            InfoCode::VendorSubstrait => get_info_builder.set_bool(f, true),
-            _ => {}
-        });
-
-        let batch = get_info_builder.finish()?;
-        let reader = SingleBatchReader::new(batch);
-        Ok(reader)
+        let info = get_info_codes();
+        Ok(info.get_info(codes).build())
     }
 
     fn get_objects(
@@ -913,13 +903,16 @@ impl Statement for DataFusionStatement {
                 self.ctx
                     .sql(&self.sql_query.clone().unwrap())
                     .await
-                    .unwrap()
+                    .map_err(ErrorHelper::from_datafusion)?
             } else {
                 let plan =
                     from_substrait_plan(&self.ctx.state(), &self.substrait_plan.clone().unwrap())
                         .await
-                        .unwrap();
-                self.ctx.execute_logical_plan(plan).await.unwrap()
+                        .map_err(ErrorHelper::from_datafusion)?;
+                self.ctx
+                    .execute_logical_plan(plan)
+                    .await
+                    .map_err(ErrorHelper::from_datafusion)?
             };
 
             Ok(DataFusionReader::new(df).await)
@@ -927,28 +920,27 @@ impl Statement for DataFusionStatement {
     }
 
     fn execute_update(&mut self) -> adbc_core::error::Result<Option<i64>> {
-        if self.sql_query.is_some() {
-            self.runtime.block_on(async {
-                let _ = self
-                    .ctx
-                    .sql(&self.sql_query.clone().unwrap())
-                    .await
-                    .unwrap();
-            });
+        if let Some(ref query) = self.sql_query {
+            let _ = self
+                .runtime
+                .block_on(async { self.ctx.sql(query).await })
+                .map_err(ErrorHelper::from_datafusion)?;
         } else if let Some(batch) = self.bound_record_batch.take() {
-            self.runtime.block_on(async {
-                let table = match self.ingest_target_table.clone() {
-                    Some(table) => table,
-                    None => todo!(),
-                };
+            let _ = self
+                .runtime
+                .block_on(async {
+                    let table = match self.ingest_target_table.clone() {
+                        Some(table) => table,
+                        None => todo!(),
+                    };
 
-                self.ctx
-                    .read_batch(batch)
-                    .unwrap()
-                    .write_table(table.as_str(), DataFrameWriteOptions::new())
-                    .await
-                    .unwrap();
-            });
+                    self.ctx
+                        .read_batch(batch)
+                        .unwrap()
+                        .write_table(table.as_str(), DataFrameWriteOptions::new())
+                        .await
+                })
+                .map_err(ErrorHelper::from_datafusion)?;
         }
 
         Ok(Some(0))
@@ -967,15 +959,19 @@ impl Statement for DataFusionStatement {
     }
 
     fn execute_partitions(&mut self) -> adbc_core::error::Result<adbc_core::PartitionedResult> {
-        todo!()
+        Err(ErrorHelper::not_implemented()
+            .message("execute_partitions")
+            .to_adbc())
     }
 
     fn get_parameter_schema(&self) -> adbc_core::error::Result<arrow_schema::Schema> {
-        todo!()
+        Err(ErrorHelper::not_implemented()
+            .message("get_parameter_schema")
+            .to_adbc())
     }
 
     fn prepare(&mut self) -> adbc_core::error::Result<()> {
-        todo!()
+        Err(ErrorHelper::not_implemented().message("prepare").to_adbc())
     }
 
     fn set_sql_query(&mut self, query: impl AsRef<str>) -> adbc_core::error::Result<()> {
@@ -989,7 +985,7 @@ impl Statement for DataFusionStatement {
     }
 
     fn cancel(&mut self) -> adbc_core::error::Result<()> {
-        todo!()
+        Err(ErrorHelper::not_implemented().message("cancel").to_adbc())
     }
 }
 
