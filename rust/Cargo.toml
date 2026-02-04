@@ -44,3 +44,7 @@ arrow-select = "57.2.0"
 
 [lib]
 crate-type = ["lib", "cdylib"]
+
+[patch.crates-io]
+# Stop BLAKE3 from exporting a stray symbol on arm64
+blake3 = { git = "https://github.com/lidavidm/BLAKE3", branch = "1.8.3-patch" }
