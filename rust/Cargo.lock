@@ -466,7 +466,8 @@ dependencies = [
 [[package]]
 name = "blake3"
 version = "1.8.3"
-source = "git+https://github.com/lidavidm/BLAKE3?branch=1.8.3-patch#a921a57ad38d9c67dbdc3e397053628d88e90350"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2468ef7d57b3fb7e16b576e8377cdbde2320c60e1491e961d11da40fc4f02a2d"
 dependencies = [
  "arrayref",
  "arrayvec",
