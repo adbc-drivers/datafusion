@@ -34,16 +34,10 @@ An [ADBC driver](https://arrow.apache.org/adbc/) for Apache DataFusion.
 
 ## Installation
 
-Pre-packaged builds of the drivers in this repo have been made available for
-various platforms from the [Columnar](https://columnar.tech) CDN. These can be
-installed by any tool that supports [ADBC](https://arrow.apache.org/adbc/)
-Driver Manifests, such as [dbc](https://columnar.tech/dbc):
+Pre-packaged builds of the drivers in this repo will be made available for
+various platforms from the [Columnar](https://columnar.tech) CDN in the future.
 
-```sh
-dbc install --pre datafusion
-```
-
-See [Building](#building) if you would rather build the drivers yourself.
+See [Building](#building) to build the drivers yourself.
 
 ## Building
 
