@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 from pathlib import Path
 
 from adbc_drivers_validation import model, quirks
@@ -65,4 +66,8 @@ class DataFusionQuirks(model.DriverQuirks):
         return quirks.split_statement(statement)
 
 
-QUIRKS = [DataFusionQuirks()]
+@functools.cache
+def get_quirks(version: str) -> model.DriverQuirks:
+    if version == "25.12":
+        return DataFusionQuirks()
+    raise ValueError(f"unsupported version: {version}")

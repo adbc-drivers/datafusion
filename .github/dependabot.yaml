@@ -1,4 +1,4 @@
-# Copyright (c) 2025 ADBC Drivers Contributors
+# Copyright (c) 2026 ADBC Drivers Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,15 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import adbc_drivers_validation.tests.query as query_tests
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    commit-message:
+      prefix: "chore(rust): "
+    directory: "/"
+    groups:
+      arrow-adbc:
+        applies-to: version-updates
+        patterns:
+          - "arrow-*"
+          - "adbc_*"
+    schedule:
+      interval: "weekly"
 
-from . import datafusion
-
-
-def pytest_generate_tests(metafunc) -> None:
-    quirks = datafusion.get_quirks(metafunc.config.getoption("vendor_version"))
-    return query_tests.generate_tests([quirks], metafunc)
-
-
-class TestQuery(query_tests.TestQuery):
-    pass
+  - package-ecosystem: "github-actions"
+    commit-message:
+      prefix: "chore: "
+    directory: "/"
+    groups:
+      actions:
+        patterns:
+          - "*"
+    schedule:
+      interval: "weekly"

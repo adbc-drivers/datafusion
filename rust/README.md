@@ -28,38 +28,27 @@
 ![Implementation: Rust](https://img.shields.io/badge/implementation-Rust-violet?style=flat-square)
 ![Status: Experimental](https://img.shields.io/badge/status-experimental-red?style=flat-square)
 
-[![crates.io: adbc_datafusion](https://img.shields.io/crates/v/adbc_datafusion?style=flat-square)](https://crates.io/crates/adbc_datafusion)
+Not affiliated with the Apache Software Foundation.
 
-## Example Usage
+An [ADBC driver](https://arrow.apache.org/adbc/) for Apache DataFusion.
 
-```
-use adbc_core::driver_manager::ManagedDriver;
-use adbc_core::options::AdbcVersion;
-use adbc_core::{Connection, Database, Driver, Statement};
-use arrow_cast::pretty::print_batches;
-use arrow_array::RecordBatch;
+## Installation
 
-fn main() {
-    let mut driver = ManagedDriver::load_dynamic_from_name(
-        "adbc_datafusion",
-        Some(b"DataFusionDriverInit"),
-        AdbcVersion::V110,
-    )
-    .unwrap();
+Pre-packaged builds of the drivers in this repo have been made available for
+various platforms from the [Columnar](https://columnar.tech) CDN. These can be
+installed by any tool that supports [ADBC](https://arrow.apache.org/adbc/)
+Driver Manifests, such as [dbc](https://columnar.tech/dbc):
 
-    let database = driver.new_database().unwrap();
-
-    let mut connection = database.new_connection().unwrap();
-
-    let mut statement = connection.new_statement().unwrap();
-    let _ = statement.set_sql_query("SELECT 'world' AS Hello");
-
-    let batches: Vec<RecordBatch> = statement.execute().unwrap().map(|b| b.unwrap()).collect();
-
-    print_batches(&batches).unwrap();
-}
+```sh
+dbc install --pre datafusion
 ```
 
-## FFI
+See [Building](#building) if you would rather build the drivers yourself.
 
-Build with the `ffi` feature to export this driver as a C driver.
+## Building
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).

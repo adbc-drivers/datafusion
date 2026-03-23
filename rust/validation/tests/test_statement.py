@@ -19,7 +19,8 @@ from . import datafusion
 
 
 def pytest_generate_tests(metafunc) -> None:
-    return statement_tests.generate_tests(datafusion.QUIRKS, metafunc)
+    quirks = datafusion.get_quirks(metafunc.config.getoption("vendor_version"))
+    return statement_tests.generate_tests([quirks], metafunc)
 
 
 class TestStatement(statement_tests.TestStatement):

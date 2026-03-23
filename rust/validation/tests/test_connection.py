@@ -20,7 +20,8 @@ from . import datafusion
 
 
 def pytest_generate_tests(metafunc) -> None:
-    return connection_tests.generate_tests(datafusion.QUIRKS, metafunc)
+    quirks = datafusion.get_quirks(metafunc.config.getoption("vendor_version"))
+    return connection_tests.generate_tests([quirks], metafunc)
 
 
 class TestConnection(connection_tests.TestConnection):
