@@ -20,8 +20,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#![allow(refining_impl_trait)]
-
 use adbc_core::constants;
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::datasource::TableType;
@@ -67,11 +65,11 @@ impl ErrorHelper {
             datafusion::error::DataFusionError::ArrowError(arrow_error, _) => {
                 Self::from_arrow(*arrow_error)
             }
-            datafusion::error::DataFusionError::ParquetError(parquet_error) => {
-                Self::io().message(parquet_error.to_string())
-            }
             datafusion::error::DataFusionError::AvroError(error) => {
                 Self::io().message(error.to_string())
+            }
+            datafusion::error::DataFusionError::ParquetError(parquet_error) => {
+                Self::io().message(parquet_error.to_string())
             }
             datafusion::error::DataFusionError::ObjectStore(error) => {
                 Self::io().message(error.to_string())
@@ -749,9 +747,9 @@ impl Connection for DataFusionConnection {
     fn get_info(
         &self,
         codes: Option<std::collections::HashSet<adbc_core::options::InfoCode>>,
-    ) -> Result<impl RecordBatchReader + Send> {
+    ) -> Result<Box<dyn RecordBatchReader + Send>> {
         let info = get_info_codes();
-        Ok(info.get_info(codes).build())
+        Ok(Box::new(info.get_info(codes).build()))
     }
 
     fn get_objects(
@@ -762,10 +760,10 @@ impl Connection for DataFusionConnection {
         _table_name: Option<&str>,
         _table_type: Option<Vec<&str>>,
         _column_name: Option<&str>,
-    ) -> Result<impl RecordBatchReader + Send> {
+    ) -> Result<Box<dyn RecordBatchReader + Send>> {
         let batch = GetObjectsBuilder::new().build(&self.runtime, &self.ctx, &depth)?;
         let reader = SingleBatchReader::new(batch);
-        Ok(reader)
+        Ok(Box::new(reader))
     }
 
     fn get_table_schema(
@@ -777,11 +775,11 @@ impl Connection for DataFusionConnection {
         todo!()
     }
 
-    fn get_table_types(&self) -> Result<SingleBatchReader> {
+    fn get_table_types(&self) -> Result<Box<dyn RecordBatchReader + Send>> {
         todo!()
     }
 
-    fn get_statistic_names(&self) -> Result<SingleBatchReader> {
+    fn get_statistic_names(&self) -> Result<Box<dyn RecordBatchReader + Send>> {
         todo!()
     }
 
@@ -791,7 +789,7 @@ impl Connection for DataFusionConnection {
         _db_schema: Option<&str>,
         _table_name: Option<&str>,
         _approximate: bool,
-    ) -> Result<SingleBatchReader> {
+    ) -> Result<Box<dyn RecordBatchReader + Send>> {
         todo!()
     }
 
@@ -803,7 +801,10 @@ impl Connection for DataFusionConnection {
         todo!()
     }
 
-    fn read_partition(&self, _partition: impl AsRef<[u8]>) -> Result<SingleBatchReader> {
+    fn read_partition(
+        &self,
+        _partition: impl AsRef<[u8]>,
+    ) -> Result<Box<dyn RecordBatchReader + Send>> {
         todo!()
     }
 }
@@ -897,7 +898,7 @@ impl Statement for DataFusionStatement {
         todo!()
     }
 
-    fn execute(&mut self) -> Result<impl RecordBatchReader + Send> {
+    fn execute(&mut self) -> Result<Box<dyn RecordBatchReader + Send>> {
         self.runtime.block_on(async {
             let df = if self.sql_query.is_some() {
                 self.ctx
@@ -915,7 +916,7 @@ impl Statement for DataFusionStatement {
                     .map_err(ErrorHelper::from_datafusion)?
             };
 
-            Ok(DataFusionReader::new(df).await)
+            Ok(Box::new(DataFusionReader::new(df).await) as Box<dyn RecordBatchReader + Send>)
         })
     }
 
