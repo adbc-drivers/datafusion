@@ -21,10 +21,10 @@ from adbc_drivers_validation import model, quirks
 class DataFusionQuirks(model.DriverQuirks):
     name = "datafusion"
     driver = "adbc_driver_datafusion"
-    driver_name = "ADBC Driver Foundry Driver for DataFusion"
-    vendor_name = "DataFusion"
-    vendor_version = "25.12"
-    short_version = "25.12"
+    driver_name = "ADBC Driver Foundry Driver for Apache DataFusion"
+    vendor_name = "Apache DataFusion"
+    vendor_version = "53.1.0"
+    short_version = "53"
     features = model.DriverFeatures(
         statement_bind=False,
         current_catalog="datafusion",
@@ -74,6 +74,6 @@ class DataFusionQuirks(model.DriverQuirks):
 
 @functools.cache
 def get_quirks(version: str) -> model.DriverQuirks:
-    if version == "25.12":
+    if version in ("53", "latest"):
         return DataFusionQuirks()
     raise ValueError(f"unsupported version: {version}")

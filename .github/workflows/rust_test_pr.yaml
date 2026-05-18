@@ -64,7 +64,7 @@ jobs:
           echo "**Remote:** ${{ steps.get_repo.outputs.repository }}@${{ inputs.ref }}" >> $GITHUB_STEP_SUMMARY
 
   test:
-    uses: adbc-drivers/datafusion/.github/workflows/go_test.yaml@main
+    uses: adbc-drivers/datafusion/.github/workflows/go_test.yaml@main # zizmor: ignore[unpinned-uses]
     needs:
       - setup
     with:

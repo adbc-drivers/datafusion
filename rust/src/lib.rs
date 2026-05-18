@@ -20,9 +20,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
+mod get_objects;
 use adbc_core::constants;
+use datafusion::common::TableReference;
 use datafusion::dataframe::DataFrameWriteOptions;
-use datafusion::datasource::TableType;
+use datafusion::datasource::MemTable;
 use datafusion::logical_expr::dml::InsertOp;
 use datafusion::prelude::*;
 use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
@@ -33,22 +35,18 @@ use std::future::Future;
 use std::sync::Arc;
 use std::vec::IntoIter;
 
-use arrow_array::{
-    ArrayRef, BooleanArray, Int16Array, Int32Array, ListArray, RecordBatch, RecordBatchReader,
-    StringArray, StructArray,
-};
-use arrow_buffer::{OffsetBuffer, ScalarBuffer};
-use arrow_schema::{ArrowError, DataType, Field, SchemaRef};
+use arrow_array::{RecordBatch, RecordBatchReader};
+use arrow_schema::{ArrowError, SchemaRef};
 
 use adbc_core::{
     Connection, Database, Driver, Optionable, Statement,
     error::{Error, Result, Status},
     options::{
-        InfoCode, ObjectDepth, OptionConnection, OptionDatabase, OptionStatement, OptionValue,
+        InfoCode, IngestMode, OptionConnection, OptionDatabase, OptionStatement, OptionValue,
     },
-    schemas,
 };
 
+use driverbase::bulk_ingest::BulkIngestState;
 use driverbase::error::ErrorHelper as _;
 
 #[derive(Clone, Copy, Debug)]
@@ -271,7 +269,7 @@ impl Optionable for DataFusionDatabase {
     ) -> adbc_core::error::Result<()> {
         Err(Error::with_message_and_status(
             format!("Unrecognized option: {key:?}"),
-            Status::NotFound,
+            Status::NotImplemented,
         ))
     }
 
@@ -308,7 +306,8 @@ impl Database for DataFusionDatabase {
     type ConnectionType = DataFusionConnection;
 
     fn new_connection(&self) -> Result<Self::ConnectionType> {
-        let ctx = SessionContext::new();
+        let config = SessionConfig::new().with_information_schema(true);
+        let ctx = SessionContext::new_with_config(config);
 
         let runtime = Runtime::new(self.handle.clone()).unwrap();
 
@@ -327,7 +326,8 @@ impl Database for DataFusionDatabase {
             ),
         >,
     ) -> adbc_core::error::Result<Self::ConnectionType> {
-        let ctx = SessionContext::new();
+        let config = SessionConfig::new().with_information_schema(true);
+        let ctx = SessionContext::new_with_config(config);
 
         let runtime = Runtime::new(self.handle.clone()).unwrap();
 
@@ -386,7 +386,7 @@ impl Optionable for DataFusionConnection {
             },
             _ => Err(Error::with_message_and_status(
                 format!("Unrecognized option: {key:?}"),
-                Status::NotFound,
+                Status::NotImplemented,
             )),
         }
     }
@@ -436,282 +436,6 @@ impl Optionable for DataFusionConnection {
     }
 }
 
-struct GetObjectsBuilder {
-    catalog_names: Vec<String>,
-    catalog_db_schema_offsets: Vec<i32>,
-    catalog_db_schema_names: Vec<String>,
-    table_offsets: Vec<i32>,
-    table_names: Vec<String>,
-    table_types: Vec<String>,
-    column_offsets: Vec<i32>,
-    column_names: Vec<String>,
-}
-
-impl GetObjectsBuilder {
-    pub fn new() -> GetObjectsBuilder {
-        GetObjectsBuilder {
-            catalog_names: vec![],
-            catalog_db_schema_offsets: vec![0],
-            catalog_db_schema_names: vec![],
-            table_offsets: vec![0],
-            table_names: vec![],
-            table_types: vec![],
-            column_offsets: vec![0],
-            column_names: vec![],
-        }
-    }
-
-    pub fn build(
-        &mut self,
-        runtime: &Runtime,
-        ctx: &SessionContext,
-        depth: &ObjectDepth,
-    ) -> Result<RecordBatch> {
-        let mut catalogs = ctx.catalog_names();
-        self.catalog_names.append(&mut catalogs);
-
-        self.catalog_names.iter().for_each(|cat| {
-            let catalog_provider = ctx.catalog(cat).unwrap();
-            let schema_names = catalog_provider.schema_names();
-            self.catalog_db_schema_names
-                .append(&mut schema_names.clone());
-
-            self.catalog_db_schema_offsets
-                .push(self.catalog_db_schema_offsets.last().unwrap() + schema_names.len() as i32);
-
-            schema_names.iter().for_each(|schema| {
-                let schema_provider = catalog_provider.schema(schema).unwrap();
-                let table_names = schema_provider.table_names();
-                self.table_names.append(&mut table_names.clone());
-                self.table_offsets
-                    .push(self.table_offsets.last().unwrap() + table_names.len() as i32);
-
-                table_names.iter().for_each(|t| {
-                    runtime.block_on(async {
-                        let table_provider = schema_provider.table(t).await.unwrap().unwrap();
-                        let table_type = match table_provider.table_type() {
-                            TableType::Base => "Base",
-                            TableType::View => "View",
-                            TableType::Temporary => "Temporary",
-                        };
-                        self.table_types.push(table_type.to_string());
-
-                        let schema = table_provider.schema();
-                        let num_fields = schema.fields().len();
-
-                        schema.fields().iter().for_each(|f| {
-                            self.column_names.push(f.name().clone());
-                        });
-                        self.column_offsets
-                            .push(self.column_offsets.last().unwrap() + num_fields as i32);
-                    });
-                });
-            });
-        });
-
-        //////////////////////////////////////////////////////
-
-        let table_columns_array = match depth {
-            ObjectDepth::Columns | ObjectDepth::All => {
-                let columns_struct_array = StructArray::from(vec![
-                    (
-                        Arc::new(Field::new("column_name", DataType::Utf8, false)),
-                        Arc::new(StringArray::from(self.column_names.clone())) as ArrayRef,
-                    ),
-                    (
-                        Arc::new(Field::new("ordinal_position", DataType::Int32, true)),
-                        Arc::new(Int32Array::new_null(self.column_names.len())) as ArrayRef,
-                    ),
-                    (
-                        Arc::new(Field::new("remarks", DataType::Utf8, true)),
-                        Arc::new(StringArray::new_null(self.column_names.len())) as ArrayRef,
-                    ),
-                    (
-                        Arc::new(Field::new("xdbc_data_type", DataType::Int16, true)),
-                        Arc::new(Int16Array::new_null(self.column_names.len())) as ArrayRef,
-                    ),
-                    (
-                        Arc::new(Field::new("xdbc_type_name", DataType::Utf8, true)),
-                        Arc::new(StringArray::new_null(self.column_names.len())) as ArrayRef,
-                    ),
-                    (
-                        Arc::new(Field::new("xdbc_column_size", DataType::Int32, true)),
-                        Arc::new(Int32Array::new_null(self.column_names.len())) as ArrayRef,
-                    ),
-                    (
-                        Arc::new(Field::new("xdbc_decimal_digits", DataType::Int16, true)),
-                        Arc::new(Int16Array::new_null(self.column_names.len())) as ArrayRef,
-                    ),
-                    (
-                        Arc::new(Field::new("xdbc_num_prec_radix", DataType::Int16, true)),
-                        Arc::new(Int16Array::new_null(self.column_names.len())) as ArrayRef,
-                    ),
-                    (
-                        Arc::new(Field::new("xdbc_nullable", DataType::Int16, true)),
-                        Arc::new(Int16Array::new_null(self.column_names.len())) as ArrayRef,
-                    ),
-                    (
-                        Arc::new(Field::new("xdbc_column_def", DataType::Utf8, true)),
-                        Arc::new(StringArray::new_null(self.column_names.len())) as ArrayRef,
-                    ),
-                    (
-                        Arc::new(Field::new("xdbc_sql_data_type", DataType::Int16, true)),
-                        Arc::new(Int16Array::new_null(self.column_names.len())) as ArrayRef,
-                    ),
-                    (
-                        Arc::new(Field::new("xdbc_datetime_sub", DataType::Int16, true)),
-                        Arc::new(Int16Array::new_null(self.column_names.len())) as ArrayRef,
-                    ),
-                    (
-                        Arc::new(Field::new("xdbc_char_octet_length", DataType::Int32, true)),
-                        Arc::new(Int32Array::new_null(self.column_names.len())) as ArrayRef,
-                    ),
-                    (
-                        Arc::new(Field::new("xdbc_is_nullable", DataType::Utf8, true)),
-                        Arc::new(StringArray::new_null(self.column_names.len())) as ArrayRef,
-                    ),
-                    (
-                        Arc::new(Field::new("xdbc_scope_catalog", DataType::Utf8, true)),
-                        Arc::new(StringArray::new_null(self.column_names.len())) as ArrayRef,
-                    ),
-                    (
-                        Arc::new(Field::new("xdbc_scope_schema", DataType::Utf8, true)),
-                        Arc::new(StringArray::new_null(self.column_names.len())) as ArrayRef,
-                    ),
-                    (
-                        Arc::new(Field::new("xdbc_scope_table", DataType::Utf8, true)),
-                        Arc::new(StringArray::new_null(self.column_names.len())) as ArrayRef,
-                    ),
-                    (
-                        Arc::new(Field::new("xdbc_is_autoincrement", DataType::Boolean, true)),
-                        Arc::new(BooleanArray::new_null(self.column_names.len())) as ArrayRef,
-                    ),
-                    (
-                        Arc::new(Field::new(
-                            "xdbc_is_generatedcolumn",
-                            DataType::Boolean,
-                            true,
-                        )),
-                        Arc::new(BooleanArray::new_null(self.column_names.len())) as ArrayRef,
-                    ),
-                ]);
-
-                ListArray::new(
-                    Arc::new(Field::new("item", schemas::COLUMN_SCHEMA.clone(), true)),
-                    OffsetBuffer::new(ScalarBuffer::from(self.column_offsets.clone())),
-                    Arc::new(columns_struct_array) as ArrayRef,
-                    None,
-                )
-            }
-            _ => ListArray::new_null(
-                Arc::new(Field::new("item", schemas::COLUMN_SCHEMA.clone(), true)),
-                self.table_names.len(),
-            ),
-        };
-
-        let db_schema_tables_array = match depth {
-            ObjectDepth::Tables | ObjectDepth::Columns | ObjectDepth::All => {
-                let table_constraints_array = ListArray::new_null(
-                    Arc::new(Field::new("item", schemas::CONSTRAINT_SCHEMA.clone(), true)),
-                    self.table_names.len(),
-                );
-
-                let tables_struct_array = StructArray::from(vec![
-                    (
-                        Arc::new(Field::new("table_name", DataType::Utf8, false)),
-                        Arc::new(StringArray::from(self.table_names.clone())) as ArrayRef,
-                    ),
-                    (
-                        Arc::new(Field::new("table_type", DataType::Utf8, false)),
-                        Arc::new(StringArray::from(self.table_types.clone())) as ArrayRef,
-                    ),
-                    (
-                        Arc::new(Field::new_list(
-                            "table_columns",
-                            Arc::new(Field::new("item", schemas::COLUMN_SCHEMA.clone(), true)),
-                            true,
-                        )),
-                        Arc::new(table_columns_array) as ArrayRef,
-                    ),
-                    (
-                        Arc::new(Field::new_list(
-                            "table_constraints",
-                            Arc::new(Field::new("item", schemas::CONSTRAINT_SCHEMA.clone(), true)),
-                            true,
-                        )),
-                        Arc::new(table_constraints_array) as ArrayRef,
-                    ),
-                ]);
-
-                ListArray::new(
-                    Arc::new(Field::new("item", schemas::TABLE_SCHEMA.clone(), true)),
-                    OffsetBuffer::new(ScalarBuffer::from(self.table_offsets.clone())),
-                    Arc::new(tables_struct_array) as ArrayRef,
-                    None,
-                )
-            }
-            _ => ListArray::new_null(
-                Arc::new(Field::new("item", schemas::TABLE_SCHEMA.clone(), true)),
-                self.catalog_db_schema_names.len(),
-            ),
-        };
-
-        let catalog_db_schemas_array = match depth {
-            ObjectDepth::Columns
-            | ObjectDepth::Tables
-            | ObjectDepth::Schemas
-            | ObjectDepth::All => {
-                let db_schemas_array = StructArray::from(vec![
-                    (
-                        Arc::new(Field::new("db_schema_name", DataType::Utf8, true)),
-                        Arc::new(StringArray::from(self.catalog_db_schema_names.clone()))
-                            as ArrayRef,
-                    ),
-                    (
-                        Arc::new(Field::new_list(
-                            "db_schema_tables",
-                            Arc::new(Field::new("item", schemas::TABLE_SCHEMA.clone(), true)),
-                            true,
-                        )),
-                        Arc::new(db_schema_tables_array) as ArrayRef,
-                    ),
-                ]);
-
-                ListArray::new(
-                    Arc::new(Field::new(
-                        "item",
-                        schemas::OBJECTS_DB_SCHEMA_SCHEMA.clone(),
-                        true,
-                    )),
-                    OffsetBuffer::new(ScalarBuffer::from(self.catalog_db_schema_offsets.clone())),
-                    Arc::new(db_schemas_array) as ArrayRef,
-                    None,
-                )
-            }
-            _ => ListArray::new_null(
-                Arc::new(Field::new(
-                    "item",
-                    schemas::OBJECTS_DB_SCHEMA_SCHEMA.clone(),
-                    true,
-                )),
-                self.catalog_names.len(),
-            ),
-        };
-
-        let catalog_name_array = StringArray::from(self.catalog_names.clone());
-
-        let batch = RecordBatch::try_new(
-            schemas::GET_OBJECTS_SCHEMA.clone(),
-            vec![
-                Arc::new(catalog_name_array),
-                Arc::new(catalog_db_schemas_array),
-            ],
-        )?;
-
-        Ok(batch)
-    }
-}
-
 static INFO_CODES: std::sync::OnceLock<driverbase::InfoRegistry> = std::sync::OnceLock::new();
 
 fn get_info_codes() -> &'static driverbase::InfoRegistry {
@@ -720,6 +444,10 @@ fn get_info_codes() -> &'static driverbase::InfoRegistry {
         registry.add_string(
             InfoCode::DriverName,
             "ADBC Driver Foundry Driver for Apache DataFusion",
+        );
+        registry.add_string(
+            InfoCode::DriverVersion,
+            concat!("v", env!("CARGO_PKG_VERSION")),
         );
         registry.add_string(InfoCode::VendorName, "Apache DataFusion");
         registry.add_string(InfoCode::VendorVersion, datafusion::DATAFUSION_VERSION);
@@ -740,10 +468,9 @@ impl Connection for DataFusionConnection {
             ctx: self.ctx.clone(),
             sql_query: None,
             substrait_plan: None,
-            bound_record_batch: None,
-            ingest_target_table: None,
-            ingest_mode: None,
-            ingest_temporary: None,
+            bound_batches: None,
+            bound_schema: None,
+            ingest: BulkIngestState::new(),
         })
     }
 
@@ -762,15 +489,22 @@ impl Connection for DataFusionConnection {
     fn get_objects(
         &self,
         depth: adbc_core::options::ObjectDepth,
-        _catalog: Option<&str>,
-        _db_schema: Option<&str>,
-        _table_name: Option<&str>,
-        _table_type: Option<Vec<&str>>,
-        _column_name: Option<&str>,
+        catalog: Option<&str>,
+        db_schema: Option<&str>,
+        table_name: Option<&str>,
+        table_type: Option<Vec<&str>>,
+        column_name: Option<&str>,
     ) -> Result<Box<dyn RecordBatchReader + Send>> {
-        let batch = GetObjectsBuilder::new().build(&self.runtime, &self.ctx, &depth)?;
-        let reader = SingleBatchReader::new(batch);
-        Ok(Box::new(reader))
+        let inner = get_objects::DataFusionGetObjects::new(self.ctx.clone(), self.runtime.clone());
+        Ok(driverbase::get_objects::get_objects(
+            inner,
+            depth,
+            catalog,
+            db_schema,
+            table_name,
+            table_type,
+            column_name,
+        ))
     }
 
     fn get_table_schema(
@@ -821,10 +555,9 @@ pub struct DataFusionStatement {
     ctx: Arc<SessionContext>,
     sql_query: Option<String>,
     substrait_plan: Option<Plan>,
-    bound_record_batch: Option<RecordBatch>,
-    ingest_target_table: Option<String>,
-    ingest_mode: Option<String>,
-    ingest_temporary: Option<String>,
+    bound_batches: Option<Vec<RecordBatch>>,
+    bound_schema: Option<SchemaRef>,
+    ingest: BulkIngestState<ErrorHelper>,
 }
 
 impl Optionable for DataFusionStatement {
@@ -835,60 +568,37 @@ impl Optionable for DataFusionStatement {
         key: Self::Option,
         value: adbc_core::options::OptionValue,
     ) -> adbc_core::error::Result<()> {
+        if self
+            .ingest
+            .set_option(&key, &value)
+            .map_err(|e| e.to_adbc())?
+        {
+            return Ok(());
+        }
         match key.as_ref() {
-            constants::ADBC_INGEST_OPTION_TARGET_TABLE => match value {
-                OptionValue::String(value) => {
-                    self.ingest_target_table = Some(value);
-                    Ok(())
-                }
-                _ => Err(Error::with_message_and_status(
-                    "IngestOptionTargetTable value must be of type String",
-                    Status::InvalidArguments,
-                )),
-            },
-            constants::ADBC_INGEST_OPTION_MODE => match value {
-                OptionValue::String(value) => {
-                    self.ingest_mode = Some(value);
-                    Ok(())
-                }
-                _ => Err(Error::with_message_and_status(
-                    "IngestMode value must be of type String",
-                    Status::InvalidArguments,
-                )),
-            },
             constants::ADBC_INGEST_OPTION_TEMPORARY => match value {
-                OptionValue::String(value) => {
-                    self.ingest_temporary = Some(value);
-                    Ok(())
-                }
+                OptionValue::String(v) if v == "false" => Ok(()),
                 _ => Err(Error::with_message_and_status(
-                    "Temporary value must be of type String",
-                    Status::InvalidArguments,
+                    "temporary tables are not supported",
+                    Status::NotImplemented,
                 )),
             },
             _ => Err(Error::with_message_and_status(
                 format!("Unrecognized option: {key:?}"),
-                Status::NotFound,
+                Status::NotImplemented,
             )),
         }
     }
 
     fn get_option_string(&self, key: Self::Option) -> adbc_core::error::Result<String> {
         match key.as_ref() {
-            constants::ADBC_INGEST_OPTION_TARGET_TABLE => {
-                self.ingest_target_table.clone().ok_or_else(|| {
-                    Error::with_message_and_status(
-                        format!("{key:?} has not been set"),
-                        Status::NotFound,
-                    )
-                })
-            }
-            constants::ADBC_INGEST_OPTION_MODE => self.ingest_mode.clone().ok_or_else(|| {
-                Error::with_message_and_status(
+            constants::ADBC_INGEST_OPTION_TARGET_TABLE => match self.ingest.table {
+                Some(ref table) => Ok(table.clone()),
+                None => Err(Error::with_message_and_status(
                     format!("{key:?} has not been set"),
                     Status::NotFound,
-                )
-            }),
+                )),
+            },
             _ => Err(Error::with_message_and_status(
                 format!("Unrecognized option: {key:?}"),
                 Status::NotFound,
@@ -918,9 +628,133 @@ impl Optionable for DataFusionStatement {
     }
 }
 
+impl DataFusionStatement {
+    fn make_table_ref(&self) -> TableReference {
+        let table = self.ingest.table.as_deref().unwrap_or("");
+        match (&self.ingest.catalog, &self.ingest.schema) {
+            (Some(catalog), Some(schema)) => {
+                TableReference::full(catalog.as_str(), schema.as_str(), table)
+            }
+            (None, Some(schema)) => TableReference::partial(schema.as_str(), table),
+            _ => TableReference::bare(table),
+        }
+    }
+
+    fn execute_bulk_ingest(&mut self) -> adbc_core::error::Result<Option<i64>> {
+        let batches = self.bound_batches.take();
+        let schema = self.bound_schema.take();
+
+        let (batches, schema) = match (batches, schema) {
+            (Some(b), Some(s)) => (b, s),
+            _ => {
+                return Err(ErrorHelper::invalid_state()
+                    .message("no data bound for bulk ingest")
+                    .to_adbc());
+            }
+        };
+
+        let row_count: i64 = batches.iter().map(|b| b.num_rows() as i64).sum();
+        let table_ref = self.make_table_ref();
+
+        self.runtime.block_on(async {
+            match self.ingest.mode {
+                IngestMode::Create => {
+                    if self
+                        .ctx
+                        .table_exist(table_ref.clone())
+                        .map_err(ErrorHelper::from_datafusion)?
+                    {
+                        return Err(ErrorHelper::already_exists()
+                            .format(format_args!(
+                                "table '{}' already exists",
+                                self.ingest.table.as_deref().unwrap_or("")
+                            ))
+                            .to_adbc());
+                    }
+                    let mem_table = MemTable::try_new(schema, vec![batches])
+                        .map_err(ErrorHelper::from_datafusion)?;
+                    self.ctx
+                        .register_table(table_ref, Arc::new(mem_table))
+                        .map_err(ErrorHelper::from_datafusion)?;
+                }
+                IngestMode::Append => {
+                    if !self
+                        .ctx
+                        .table_exist(table_ref.clone())
+                        .map_err(ErrorHelper::from_datafusion)?
+                    {
+                        return Err(ErrorHelper::not_found()
+                            .format(format_args!(
+                                "Not found: Table '{}'",
+                                self.ingest.table.as_deref().unwrap_or("")
+                            ))
+                            .to_adbc());
+                    }
+                    let df = self
+                        .ctx
+                        .read_batches(batches)
+                        .map_err(ErrorHelper::from_datafusion)?;
+                    df.write_table(
+                        &table_ref.to_string(),
+                        DataFrameWriteOptions::new().with_insert_operation(InsertOp::Append),
+                    )
+                    .await
+                    .map_err(ErrorHelper::from_datafusion)?;
+                }
+                IngestMode::Replace => {
+                    if self
+                        .ctx
+                        .table_exist(table_ref.clone())
+                        .map_err(ErrorHelper::from_datafusion)?
+                    {
+                        self.ctx
+                            .deregister_table(table_ref.clone())
+                            .map_err(ErrorHelper::from_datafusion)?;
+                    }
+                    let mem_table = MemTable::try_new(schema, vec![batches])
+                        .map_err(ErrorHelper::from_datafusion)?;
+                    self.ctx
+                        .register_table(table_ref, Arc::new(mem_table))
+                        .map_err(ErrorHelper::from_datafusion)?;
+                }
+                IngestMode::CreateAppend => {
+                    if self
+                        .ctx
+                        .table_exist(table_ref.clone())
+                        .map_err(ErrorHelper::from_datafusion)?
+                    {
+                        let df = self
+                            .ctx
+                            .read_batches(batches)
+                            .map_err(ErrorHelper::from_datafusion)?;
+                        df.write_table(
+                            &table_ref.to_string(),
+                            DataFrameWriteOptions::new().with_insert_operation(InsertOp::Append),
+                        )
+                        .await
+                        .map_err(ErrorHelper::from_datafusion)?;
+                    } else {
+                        let mem_table = MemTable::try_new(schema, vec![batches])
+                            .map_err(ErrorHelper::from_datafusion)?;
+                        self.ctx
+                            .register_table(table_ref, Arc::new(mem_table))
+                            .map_err(ErrorHelper::from_datafusion)?;
+                    }
+                }
+            }
+            Ok(())
+        })?;
+
+        self.ingest.clear();
+        Ok(Some(row_count))
+    }
+}
+
 impl Statement for DataFusionStatement {
     fn bind(&mut self, batch: arrow_array::RecordBatch) -> adbc_core::error::Result<()> {
-        self.bound_record_batch.replace(batch);
+        let schema = batch.schema();
+        self.bound_batches = Some(vec![batch]);
+        self.bound_schema = Some(schema);
         Ok(())
     }
 
@@ -929,21 +763,10 @@ impl Statement for DataFusionStatement {
         reader: Box<dyn arrow_array::RecordBatchReader + Send>,
     ) -> adbc_core::error::Result<()> {
         let schema = reader.schema();
-        let batches: Vec<RecordBatch> = reader
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| {
-                Error::with_message_and_status(
-                    format!("Failed to read batches from stream: {e}"),
-                    Status::Internal,
-                )
-            })?;
-        let combined = arrow_select::concat::concat_batches(&schema, &batches).map_err(|e| {
-            Error::with_message_and_status(
-                format!("Failed to concatenate batches: {e}"),
-                Status::Internal,
-            )
-        })?;
-        self.bound_record_batch = Some(combined);
+        let batches: std::result::Result<Vec<RecordBatch>, ArrowError> = reader.collect();
+        let batches = batches.map_err(ErrorHelper::from_arrow)?;
+        self.bound_batches = Some(batches);
+        self.bound_schema = Some(schema);
         Ok(())
     }
 
@@ -970,109 +793,19 @@ impl Statement for DataFusionStatement {
     }
 
     fn execute_update(&mut self) -> adbc_core::error::Result<Option<i64>> {
-        if let Some(batch) = self.bound_record_batch.take() {
-            let table_name = self.ingest_target_table.clone().ok_or_else(|| {
-                Error::with_message_and_status(
-                    "IngestTargetTable must be set for bulk ingest",
-                    Status::InvalidState,
-                )
-            })?;
-            let mode = self
-                .ingest_mode
-                .as_deref()
-                .unwrap_or(constants::ADBC_INGEST_OPTION_MODE_CREATE);
+        if self.ingest.is_set() {
+            return self.execute_bulk_ingest();
+        }
 
-            let row_count = batch.num_rows() as i64;
-
+        if let Some(ref query) = self.sql_query {
             self.runtime.block_on(async {
-                let table_exists = self
+                let df = self
                     .ctx
-                    .table_exist(table_name.as_str())
-                    .map_err(ErrorHelper::from_datafusion)?;
-
-                match mode {
-                    constants::ADBC_INGEST_OPTION_MODE_CREATE => {
-                        if table_exists {
-                            return Err(Error::with_message_and_status(
-                                format!("Table '{table_name}' already exists"),
-                                Status::AlreadyExists,
-                            ));
-                        }
-                        self.ctx
-                            .register_batch(&table_name, batch)
-                            .map_err(ErrorHelper::from_datafusion)?;
-                    }
-                    constants::ADBC_INGEST_OPTION_MODE_APPEND => {
-                        if !table_exists {
-                            return Err(Error::with_message_and_status(
-                                format!("Table '{table_name}' does not exist"),
-                                Status::NotFound,
-                            ));
-                        }
-                        self.ctx
-                            .read_batch(batch)
-                            .map_err(ErrorHelper::from_datafusion)?
-                            .write_table(
-                                &table_name,
-                                DataFrameWriteOptions::new()
-                                    .with_insert_operation(InsertOp::Append),
-                            )
-                            .await
-                            .map_err(ErrorHelper::from_datafusion)?;
-                    }
-                    constants::ADBC_INGEST_OPTION_MODE_REPLACE => {
-                        if table_exists {
-                            self.ctx
-                                .deregister_table(&table_name)
-                                .map_err(ErrorHelper::from_datafusion)?;
-                        }
-                        self.ctx
-                            .register_batch(&table_name, batch)
-                            .map_err(ErrorHelper::from_datafusion)?;
-                    }
-                    constants::ADBC_INGEST_OPTION_MODE_CREATE_APPEND => {
-                        if table_exists {
-                            self.ctx
-                                .read_batch(batch)
-                                .map_err(ErrorHelper::from_datafusion)?
-                                .write_table(
-                                    &table_name,
-                                    DataFrameWriteOptions::new()
-                                        .with_insert_operation(InsertOp::Append),
-                                )
-                                .await
-                                .map_err(ErrorHelper::from_datafusion)?;
-                        } else {
-                            self.ctx
-                                .register_batch(&table_name, batch)
-                                .map_err(ErrorHelper::from_datafusion)?;
-                        }
-                    }
-                    _ => {
-                        return Err(Error::with_message_and_status(
-                            format!("Unsupported ingest mode: {mode}"),
-                            Status::InvalidArguments,
-                        ));
-                    }
-                }
-                Ok(())
-            })?;
-
-            return Ok(Some(row_count));
-        } else if self.ingest_target_table.is_some() {
-            return Err(Error::with_message_and_status(
-                "No data bound for bulk ingest",
-                Status::InvalidState,
-            ));
-        } else if let Some(ref query) = self.sql_query {
-            self.runtime.block_on(async {
-                self.ctx
                     .sql(query)
                     .await
-                    .map_err(ErrorHelper::from_datafusion)?
-                    .collect()
-                    .await
-                    .map_err(ErrorHelper::from_datafusion)
+                    .map_err(ErrorHelper::from_datafusion)?;
+                df.collect().await.map_err(ErrorHelper::from_datafusion)?;
+                Ok::<_, Error>(())
             })?;
         }
 

@@ -1,4 +1,4 @@
-# Copyright (c) 2025 ADBC Drivers Contributors
+# Copyright (c) 2025-2026 ADBC Drivers Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,8 +27,12 @@ if __name__ == "__main__":
     template = template.resolve()
 
     generate_documentation.generate(
-        datafusion.QUIRKS,
-        Path("validation-report.xml").resolve(),
+        "datafusion",
+        lambda version, vendor: datafusion.get_quirks(version),
+        [
+            ("datafusion", "Apache DataFusion"),
+        ],
+        [Path("validation-report.xml").resolve()],
         template,
         args.output.resolve(),
     )

@@ -16,6 +16,7 @@ dependencies = [
  "datafusion-substrait",
  "driverbase",
  "prost",
+ "regex",
  "tokio",
 ]
 
