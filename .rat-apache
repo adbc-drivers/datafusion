@@ -17,3 +17,4 @@ rust/Cargo.toml
 rust/README.md
 rust/src/lib.rs
 rust/tests/test_datafusion.rs
+README.md
