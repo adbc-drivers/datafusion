@@ -27,8 +27,11 @@ class DataFusionQuirks(model.DriverQuirks):
     short_version = "25.12"
     features = model.DriverFeatures(
         statement_bind=False,
-        current_catalog="",
-        current_schema="db",
+        current_catalog="datafusion",
+        current_schema="public",
+        get_objects=True,
+        statement_bulk_ingest=True,
+        statement_rows_affected=True,
     )
     setup = model.DriverSetup(
         database={},
@@ -41,7 +44,10 @@ class DataFusionQuirks(model.DriverQuirks):
         return (Path(__file__).parent.parent / "queries",)
 
     def is_table_not_found(self, table_name: str, error: Exception) -> bool:
-        return "Not found: Table" in str(error) and table_name in str(error)
+        msg = str(error)
+        if table_name and table_name not in msg:
+            return False
+        return "Not found: Table" in msg or "does not exist" in msg
 
     def quote_one_identifier(self, identifier: str) -> str:
         return f"`{identifier}`"

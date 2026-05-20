@@ -21,3 +21,4 @@ build/
 
 # validation
 validation-report.xml
+__pycache__/

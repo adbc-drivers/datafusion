@@ -12,8 +12,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-rust/license.tpl
-rust/pixi.lock
-rust/Cargo.lock
-rust/validation/queries/**/*.json
-rust/validation/queries/**/*.sql
+[tags]
+broken_vendor = "DataFusion converts large_string to string_view on read-back"

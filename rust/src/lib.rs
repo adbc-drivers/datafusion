@@ -23,6 +23,7 @@
 use adbc_core::constants;
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::datasource::TableType;
+use datafusion::logical_expr::dml::InsertOp;
 use datafusion::prelude::*;
 use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
 use datafusion_substrait::substrait::proto::Plan;
@@ -722,6 +723,10 @@ fn get_info_codes() -> &'static driverbase::InfoRegistry {
         );
         registry.add_string(InfoCode::VendorName, "Apache DataFusion");
         registry.add_string(InfoCode::VendorVersion, datafusion::DATAFUSION_VERSION);
+        registry.add_string(
+            InfoCode::DriverArrowVersion,
+            &format!("v{}", datafusion::arrow::ARROW_VERSION),
+        );
         registry
     })
 }
@@ -737,6 +742,8 @@ impl Connection for DataFusionConnection {
             substrait_plan: None,
             bound_record_batch: None,
             ingest_target_table: None,
+            ingest_mode: None,
+            ingest_temporary: None,
         })
     }
 
@@ -816,6 +823,8 @@ pub struct DataFusionStatement {
     substrait_plan: Option<Plan>,
     bound_record_batch: Option<RecordBatch>,
     ingest_target_table: Option<String>,
+    ingest_mode: Option<String>,
+    ingest_temporary: Option<String>,
 }
 
 impl Optionable for DataFusionStatement {
@@ -837,6 +846,26 @@ impl Optionable for DataFusionStatement {
                     Status::InvalidArguments,
                 )),
             },
+            constants::ADBC_INGEST_OPTION_MODE => match value {
+                OptionValue::String(value) => {
+                    self.ingest_mode = Some(value);
+                    Ok(())
+                }
+                _ => Err(Error::with_message_and_status(
+                    "IngestMode value must be of type String",
+                    Status::InvalidArguments,
+                )),
+            },
+            constants::ADBC_INGEST_OPTION_TEMPORARY => match value {
+                OptionValue::String(value) => {
+                    self.ingest_temporary = Some(value);
+                    Ok(())
+                }
+                _ => Err(Error::with_message_and_status(
+                    "Temporary value must be of type String",
+                    Status::InvalidArguments,
+                )),
+            },
             _ => Err(Error::with_message_and_status(
                 format!("Unrecognized option: {key:?}"),
                 Status::NotFound,
@@ -847,15 +876,19 @@ impl Optionable for DataFusionStatement {
     fn get_option_string(&self, key: Self::Option) -> adbc_core::error::Result<String> {
         match key.as_ref() {
             constants::ADBC_INGEST_OPTION_TARGET_TABLE => {
-                let target_table = self.ingest_target_table.clone();
-                match target_table {
-                    Some(table) => Ok(table),
-                    None => Err(Error::with_message_and_status(
+                self.ingest_target_table.clone().ok_or_else(|| {
+                    Error::with_message_and_status(
                         format!("{key:?} has not been set"),
                         Status::NotFound,
-                    )),
-                }
+                    )
+                })
             }
+            constants::ADBC_INGEST_OPTION_MODE => self.ingest_mode.clone().ok_or_else(|| {
+                Error::with_message_and_status(
+                    format!("{key:?} has not been set"),
+                    Status::NotFound,
+                )
+            }),
             _ => Err(Error::with_message_and_status(
                 format!("Unrecognized option: {key:?}"),
                 Status::NotFound,
@@ -893,9 +926,25 @@ impl Statement for DataFusionStatement {
 
     fn bind_stream(
         &mut self,
-        _reader: Box<dyn arrow_array::RecordBatchReader + Send>,
+        reader: Box<dyn arrow_array::RecordBatchReader + Send>,
     ) -> adbc_core::error::Result<()> {
-        todo!()
+        let schema = reader.schema();
+        let batches: Vec<RecordBatch> = reader
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| {
+                Error::with_message_and_status(
+                    format!("Failed to read batches from stream: {e}"),
+                    Status::Internal,
+                )
+            })?;
+        let combined = arrow_select::concat::concat_batches(&schema, &batches).map_err(|e| {
+            Error::with_message_and_status(
+                format!("Failed to concatenate batches: {e}"),
+                Status::Internal,
+            )
+        })?;
+        self.bound_record_batch = Some(combined);
+        Ok(())
     }
 
     fn execute(&mut self) -> Result<Box<dyn RecordBatchReader + Send>> {
@@ -921,27 +970,110 @@ impl Statement for DataFusionStatement {
     }
 
     fn execute_update(&mut self) -> adbc_core::error::Result<Option<i64>> {
-        if let Some(ref query) = self.sql_query {
-            let _ = self
-                .runtime
-                .block_on(async { self.ctx.sql(query).await })
-                .map_err(ErrorHelper::from_datafusion)?;
-        } else if let Some(batch) = self.bound_record_batch.take() {
-            let _ = self
-                .runtime
-                .block_on(async {
-                    let table = match self.ingest_target_table.clone() {
-                        Some(table) => table,
-                        None => todo!(),
-                    };
+        if let Some(batch) = self.bound_record_batch.take() {
+            let table_name = self.ingest_target_table.clone().ok_or_else(|| {
+                Error::with_message_and_status(
+                    "IngestTargetTable must be set for bulk ingest",
+                    Status::InvalidState,
+                )
+            })?;
+            let mode = self
+                .ingest_mode
+                .as_deref()
+                .unwrap_or(constants::ADBC_INGEST_OPTION_MODE_CREATE);
 
-                    self.ctx
-                        .read_batch(batch)
-                        .unwrap()
-                        .write_table(table.as_str(), DataFrameWriteOptions::new())
-                        .await
-                })
-                .map_err(ErrorHelper::from_datafusion)?;
+            let row_count = batch.num_rows() as i64;
+
+            self.runtime.block_on(async {
+                let table_exists = self
+                    .ctx
+                    .table_exist(table_name.as_str())
+                    .map_err(ErrorHelper::from_datafusion)?;
+
+                match mode {
+                    constants::ADBC_INGEST_OPTION_MODE_CREATE => {
+                        if table_exists {
+                            return Err(Error::with_message_and_status(
+                                format!("Table '{table_name}' already exists"),
+                                Status::AlreadyExists,
+                            ));
+                        }
+                        self.ctx
+                            .register_batch(&table_name, batch)
+                            .map_err(ErrorHelper::from_datafusion)?;
+                    }
+                    constants::ADBC_INGEST_OPTION_MODE_APPEND => {
+                        if !table_exists {
+                            return Err(Error::with_message_and_status(
+                                format!("Table '{table_name}' does not exist"),
+                                Status::NotFound,
+                            ));
+                        }
+                        self.ctx
+                            .read_batch(batch)
+                            .map_err(ErrorHelper::from_datafusion)?
+                            .write_table(
+                                &table_name,
+                                DataFrameWriteOptions::new()
+                                    .with_insert_operation(InsertOp::Append),
+                            )
+                            .await
+                            .map_err(ErrorHelper::from_datafusion)?;
+                    }
+                    constants::ADBC_INGEST_OPTION_MODE_REPLACE => {
+                        if table_exists {
+                            self.ctx
+                                .deregister_table(&table_name)
+                                .map_err(ErrorHelper::from_datafusion)?;
+                        }
+                        self.ctx
+                            .register_batch(&table_name, batch)
+                            .map_err(ErrorHelper::from_datafusion)?;
+                    }
+                    constants::ADBC_INGEST_OPTION_MODE_CREATE_APPEND => {
+                        if table_exists {
+                            self.ctx
+                                .read_batch(batch)
+                                .map_err(ErrorHelper::from_datafusion)?
+                                .write_table(
+                                    &table_name,
+                                    DataFrameWriteOptions::new()
+                                        .with_insert_operation(InsertOp::Append),
+                                )
+                                .await
+                                .map_err(ErrorHelper::from_datafusion)?;
+                        } else {
+                            self.ctx
+                                .register_batch(&table_name, batch)
+                                .map_err(ErrorHelper::from_datafusion)?;
+                        }
+                    }
+                    _ => {
+                        return Err(Error::with_message_and_status(
+                            format!("Unsupported ingest mode: {mode}"),
+                            Status::InvalidArguments,
+                        ));
+                    }
+                }
+                Ok(())
+            })?;
+
+            return Ok(Some(row_count));
+        } else if self.ingest_target_table.is_some() {
+            return Err(Error::with_message_and_status(
+                "No data bound for bulk ingest",
+                Status::InvalidState,
+            ));
+        } else if let Some(ref query) = self.sql_query {
+            self.runtime.block_on(async {
+                self.ctx
+                    .sql(query)
+                    .await
+                    .map_err(ErrorHelper::from_datafusion)?
+                    .collect()
+                    .await
+                    .map_err(ErrorHelper::from_datafusion)
+            })?;
         }
 
         Ok(Some(0))

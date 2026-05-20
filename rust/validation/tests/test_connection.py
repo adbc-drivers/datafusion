@@ -25,69 +25,41 @@ def pytest_generate_tests(metafunc) -> None:
 
 
 class TestConnection(connection_tests.TestConnection):
-    @pytest.mark.xfail(reason="get_option_string(CurrentCatalog) not implemented")
-    def test_current_catalog(self, driver, conn) -> None:
-        super().test_current_catalog(driver, conn)
-
-    @pytest.mark.xfail(reason="get_option_string(CurrentSchema) not implemented")
-    def test_current_db_schema(self, driver, conn) -> None:
-        super().test_current_db_schema(driver, conn)
-
     @pytest.mark.xfail(reason="get_info() not implemented")
     def test_get_info(self, driver, conn, record_property) -> None:
         super().test_get_info(driver, conn, record_property)
 
-    @pytest.mark.xfail(reason="get_objects() not implemented")
+    @pytest.mark.xfail(
+        reason="get_objects() catalog/schema always present in DataFusion"
+    )
     def test_get_objects_catalog(self, conn, driver) -> None:
         super().test_get_objects_catalog(conn, driver)
 
-    @pytest.mark.xfail(reason="get_objects() not implemented")
+    @pytest.mark.xfail(
+        reason="get_objects() catalog/schema always present in DataFusion"
+    )
     def test_get_objects_schema(self, conn, driver) -> None:
         super().test_get_objects_schema(conn, driver)
 
-    @pytest.mark.xfail(reason="get_objects() not implemented")
-    def test_get_objects_table_not_exist(self, conn, driver) -> None:
-        super().test_get_objects_table_not_exist(conn, driver)
-
-    @pytest.mark.xfail(reason="get_objects() not implemented")
-    def test_get_objects_table_present(self, conn, driver, get_objects_table) -> None:
-        super().test_get_objects_table_present(conn, driver, get_objects_table)
-
-    @pytest.mark.xfail(reason="get_objects() not implemented")
+    @pytest.mark.xfail(reason="get_objects() filter parameters not implemented")
     def test_get_objects_table_invalid_catalog(
         self, conn, driver, get_objects_table
     ) -> None:
         super().test_get_objects_table_invalid_catalog(conn, driver, get_objects_table)
 
-    @pytest.mark.xfail(reason="get_objects() not implemented")
+    @pytest.mark.xfail(reason="get_objects() filter parameters not implemented")
     def test_get_objects_table_invalid_schema(
         self, conn, driver, get_objects_table
     ) -> None:
         super().test_get_objects_table_invalid_schema(conn, driver, get_objects_table)
 
-    @pytest.mark.xfail(reason="get_objects() not implemented")
+    @pytest.mark.xfail(reason="get_objects() filter parameters not implemented")
     def test_get_objects_table_invalid_table(
         self, conn, driver, get_objects_table
     ) -> None:
         super().test_get_objects_table_invalid_table(conn, driver, get_objects_table)
 
-    @pytest.mark.xfail(reason="get_objects() not implemented")
-    def test_get_objects_table_exact_table(
-        self, conn, driver, get_objects_table
-    ) -> None:
-        super().test_get_objects_table_exact_table(conn, driver, get_objects_table)
-
-    @pytest.mark.xfail(reason="get_objects() not implemented")
-    def test_get_objects_column_not_exist(
-        self, conn, driver, get_objects_table
-    ) -> None:
-        super().test_get_objects_column_not_exist(conn, driver, get_objects_table)
-
-    @pytest.mark.xfail(reason="get_objects() not implemented")
-    def test_get_objects_column_present(self, conn, driver, get_objects_table) -> None:
-        super().test_get_objects_column_present(conn, driver, get_objects_table)
-
-    @pytest.mark.xfail(reason="get_objects() not implemented")
+    @pytest.mark.xfail(reason="get_objects() column_name filter not implemented")
     def test_get_objects_column_filter_column_name(
         self, conn, driver, get_objects_table
     ) -> None:
@@ -95,32 +67,6 @@ class TestConnection(connection_tests.TestConnection):
             conn, driver, get_objects_table
         )
 
-    @pytest.mark.xfail(reason="get_objects() not implemented")
-    def test_get_objects_column_filter_table_name(
-        self, conn, driver, get_objects_table
-    ) -> None:
-        super().test_get_objects_column_filter_table_name(
-            conn, driver, get_objects_table
-        )
-
-    @pytest.mark.xfail(reason="get_objects() not implemented")
-    def test_get_objects_column_filter_catalog(
-        self, conn, driver, get_objects_table
-    ) -> None:
-        super().test_get_objects_column_filter_catalog(conn, driver, get_objects_table)
-
-    @pytest.mark.xfail(reason="get_objects() not implemented")
-    def test_get_objects_column_filter_schema(
-        self, conn, driver, get_objects_table
-    ) -> None:
-        super().test_get_objects_column_filter_schema(conn, driver, get_objects_table)
-
-    @pytest.mark.xfail(reason="get_objects() not implemented")
-    def test_get_objects_column_filter_table(
-        self, conn, driver, get_objects_table
-    ) -> None:
-        super().test_get_objects_column_filter_table(conn, driver, get_objects_table)
-
-    @pytest.mark.xfail(reason="get_objects() not implemented")
+    @pytest.mark.xfail(reason="get_objects() ordinal_position not populated")
     def test_get_objects_column_xdbc(self, conn, driver, get_objects_table) -> None:
         super().test_get_objects_column_xdbc(conn, driver, get_objects_table)

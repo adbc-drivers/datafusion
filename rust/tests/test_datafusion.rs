@@ -172,6 +172,10 @@ fn test_ingest() {
         OptionStatement::TargetTable,
         OptionValue::String("example".to_string()),
     );
+    let _ = statement.set_option(
+        OptionStatement::IngestMode,
+        OptionValue::String(String::from(adbc_core::options::IngestMode::Append)),
+    );
     let _ = statement.bind(batch);
 
     let _ = statement.execute_update();
