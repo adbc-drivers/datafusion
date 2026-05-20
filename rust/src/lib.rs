@@ -883,14 +883,12 @@ impl Optionable for DataFusionStatement {
                     )
                 })
             }
-            constants::ADBC_INGEST_OPTION_MODE => {
-                self.ingest_mode.clone().ok_or_else(|| {
-                    Error::with_message_and_status(
-                        format!("{key:?} has not been set"),
-                        Status::NotFound,
-                    )
-                })
-            }
+            constants::ADBC_INGEST_OPTION_MODE => self.ingest_mode.clone().ok_or_else(|| {
+                Error::with_message_and_status(
+                    format!("{key:?} has not been set"),
+                    Status::NotFound,
+                )
+            }),
             _ => Err(Error::with_message_and_status(
                 format!("Unrecognized option: {key:?}"),
                 Status::NotFound,
@@ -986,32 +984,54 @@ impl Statement for DataFusionStatement {
 
             let row_count = batch.num_rows() as i64;
 
-            self.runtime
-                .block_on(async {
-                    let table_exists = self
-                        .ctx
-                        .table_exist(table_name.as_str())
-                        .map_err(ErrorHelper::from_datafusion)?;
+            self.runtime.block_on(async {
+                let table_exists = self
+                    .ctx
+                    .table_exist(table_name.as_str())
+                    .map_err(ErrorHelper::from_datafusion)?;
 
-                    match mode {
-                        constants::ADBC_INGEST_OPTION_MODE_CREATE => {
-                            if table_exists {
-                                return Err(Error::with_message_and_status(
-                                    format!("Table '{table_name}' already exists"),
-                                    Status::AlreadyExists,
-                                ));
-                            }
+                match mode {
+                    constants::ADBC_INGEST_OPTION_MODE_CREATE => {
+                        if table_exists {
+                            return Err(Error::with_message_and_status(
+                                format!("Table '{table_name}' already exists"),
+                                Status::AlreadyExists,
+                            ));
+                        }
+                        self.ctx
+                            .register_batch(&table_name, batch)
+                            .map_err(ErrorHelper::from_datafusion)?;
+                    }
+                    constants::ADBC_INGEST_OPTION_MODE_APPEND => {
+                        if !table_exists {
+                            return Err(Error::with_message_and_status(
+                                format!("Table '{table_name}' does not exist"),
+                                Status::NotFound,
+                            ));
+                        }
+                        self.ctx
+                            .read_batch(batch)
+                            .map_err(ErrorHelper::from_datafusion)?
+                            .write_table(
+                                &table_name,
+                                DataFrameWriteOptions::new()
+                                    .with_insert_operation(InsertOp::Append),
+                            )
+                            .await
+                            .map_err(ErrorHelper::from_datafusion)?;
+                    }
+                    constants::ADBC_INGEST_OPTION_MODE_REPLACE => {
+                        if table_exists {
                             self.ctx
-                                .register_batch(&table_name, batch)
+                                .deregister_table(&table_name)
                                 .map_err(ErrorHelper::from_datafusion)?;
                         }
-                        constants::ADBC_INGEST_OPTION_MODE_APPEND => {
-                            if !table_exists {
-                                return Err(Error::with_message_and_status(
-                                    format!("Table '{table_name}' does not exist"),
-                                    Status::NotFound,
-                                ));
-                            }
+                        self.ctx
+                            .register_batch(&table_name, batch)
+                            .map_err(ErrorHelper::from_datafusion)?;
+                    }
+                    constants::ADBC_INGEST_OPTION_MODE_CREATE_APPEND => {
+                        if table_exists {
                             self.ctx
                                 .read_batch(batch)
                                 .map_err(ErrorHelper::from_datafusion)?
@@ -1022,44 +1042,21 @@ impl Statement for DataFusionStatement {
                                 )
                                 .await
                                 .map_err(ErrorHelper::from_datafusion)?;
-                        }
-                        constants::ADBC_INGEST_OPTION_MODE_REPLACE => {
-                            if table_exists {
-                                self.ctx
-                                    .deregister_table(&table_name)
-                                    .map_err(ErrorHelper::from_datafusion)?;
-                            }
+                        } else {
                             self.ctx
                                 .register_batch(&table_name, batch)
                                 .map_err(ErrorHelper::from_datafusion)?;
                         }
-                        constants::ADBC_INGEST_OPTION_MODE_CREATE_APPEND => {
-                            if table_exists {
-                                self.ctx
-                                    .read_batch(batch)
-                                    .map_err(ErrorHelper::from_datafusion)?
-                                    .write_table(
-                                        &table_name,
-                                        DataFrameWriteOptions::new()
-                                            .with_insert_operation(InsertOp::Append),
-                                    )
-                                    .await
-                                    .map_err(ErrorHelper::from_datafusion)?;
-                            } else {
-                                self.ctx
-                                    .register_batch(&table_name, batch)
-                                    .map_err(ErrorHelper::from_datafusion)?;
-                            }
-                        }
-                        _ => {
-                            return Err(Error::with_message_and_status(
-                                format!("Unsupported ingest mode: {mode}"),
-                                Status::InvalidArguments,
-                            ));
-                        }
                     }
-                    Ok(())
-                })?;
+                    _ => {
+                        return Err(Error::with_message_and_status(
+                            format!("Unsupported ingest mode: {mode}"),
+                            Status::InvalidArguments,
+                        ));
+                    }
+                }
+                Ok(())
+            })?;
 
             return Ok(Some(row_count));
         } else if self.ingest_target_table.is_some() {
@@ -1068,16 +1065,15 @@ impl Statement for DataFusionStatement {
                 Status::InvalidState,
             ));
         } else if let Some(ref query) = self.sql_query {
-            self.runtime
-                .block_on(async {
-                    self.ctx
-                        .sql(query)
-                        .await
-                        .map_err(ErrorHelper::from_datafusion)?
-                        .collect()
-                        .await
-                        .map_err(ErrorHelper::from_datafusion)
-                })?;
+            self.runtime.block_on(async {
+                self.ctx
+                    .sql(query)
+                    .await
+                    .map_err(ErrorHelper::from_datafusion)?
+                    .collect()
+                    .await
+                    .map_err(ErrorHelper::from_datafusion)
+            })?;
         }
 
         Ok(Some(0))

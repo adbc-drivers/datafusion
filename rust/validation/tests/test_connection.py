@@ -29,11 +29,15 @@ class TestConnection(connection_tests.TestConnection):
     def test_get_info(self, driver, conn, record_property) -> None:
         super().test_get_info(driver, conn, record_property)
 
-    @pytest.mark.xfail(reason="get_objects() catalog/schema always present in DataFusion")
+    @pytest.mark.xfail(
+        reason="get_objects() catalog/schema always present in DataFusion"
+    )
     def test_get_objects_catalog(self, conn, driver) -> None:
         super().test_get_objects_catalog(conn, driver)
 
-    @pytest.mark.xfail(reason="get_objects() catalog/schema always present in DataFusion")
+    @pytest.mark.xfail(
+        reason="get_objects() catalog/schema always present in DataFusion"
+    )
     def test_get_objects_schema(self, conn, driver) -> None:
         super().test_get_objects_schema(conn, driver)
 

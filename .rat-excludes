@@ -15,3 +15,5 @@
 rust/license.tpl
 rust/pixi.lock
 rust/Cargo.lock
+rust/validation/queries/**/*.json
+rust/validation/queries/**/*.sql
