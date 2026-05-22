@@ -12,7 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// part: metadata
+
+[setup]
+drop = "test_timestamp"
+
+[tags]
+sql-type-name = "TIMESTAMP"
+caveats = ["DataFusion uses nanosecond precision; max timestamp is 2262-04-11T23:47:16"]
+
 // part: setup_query
+
 CREATE TABLE test_timestamp (
     idx INTEGER,
     res TIMESTAMP
@@ -25,6 +35,7 @@ INSERT INTO test_timestamp (idx, res) VALUES (4, TIMESTAMP '2262-04-11 23:47:16'
 INSERT INTO test_timestamp (idx, res) VALUES (5, NULL);
 
 // part: expected_schema
+
 {
     "format": "+s",
     "children": [
@@ -37,6 +48,7 @@ INSERT INTO test_timestamp (idx, res) VALUES (5, NULL);
 }
 
 // part: expected
+
 {"res": 1684158330000000000}
 {"res": 946684800000000000}
 {"res": -14182940000000000}

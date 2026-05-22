@@ -37,6 +37,7 @@ arrow-select = "58"
 datafusion = { version = "53", default-features = false, features = ["avro", "compression", "crypto_expressions", "datetime_expressions", "nested_expressions", "parquet", "recursive_protection", "regex_expressions", "sql", "unicode_expressions"] }
 datafusion-substrait = { version = "53", default-features = false }
 driverbase = { git = "https://github.com/adbc-drivers/driverbase-rs.git" }
+regex = "1"
 tokio = { version = "1.49", features = ["rt-multi-thread"] }
 prost = "0.14.3"
 

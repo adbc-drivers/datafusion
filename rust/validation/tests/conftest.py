@@ -21,6 +21,7 @@ import pytest
 from adbc_drivers_validation.tests.conftest import (  # noqa: F401
     conn,
     conn_factory,
+    db_kwargs,
     manual_test,
     pytest_collection_modifyitems,
 )
@@ -30,7 +31,7 @@ from . import datafusion
 
 def pytest_addoption(parser):
     adbc_drivers_validation.tests.conftest.pytest_addoption(parser)
-    parser.addoption("--vendor-version", action="store", default="25.12")
+    parser.addoption("--vendor-version", action="store", default="53")
 
 
 @pytest.fixture(scope="session")

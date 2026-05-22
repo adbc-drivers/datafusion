@@ -13,6 +13,7 @@
 // limitations under the License.
 
 // part: expected_schema
+
 {
     "format": "+s",
     "children": [
@@ -25,6 +26,7 @@
 }
 
 // part: expected
+
 {"res": 49531123456000}
 {"res": 0}
 {"res": 86399999999000}

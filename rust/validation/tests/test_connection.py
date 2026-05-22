@@ -14,7 +14,6 @@
 
 
 import adbc_drivers_validation.tests.connection as connection_tests
-import pytest
 
 from . import datafusion
 
@@ -25,48 +24,4 @@ def pytest_generate_tests(metafunc) -> None:
 
 
 class TestConnection(connection_tests.TestConnection):
-    @pytest.mark.xfail(reason="get_info() not implemented")
-    def test_get_info(self, driver, conn, record_property) -> None:
-        super().test_get_info(driver, conn, record_property)
-
-    @pytest.mark.xfail(
-        reason="get_objects() catalog/schema always present in DataFusion"
-    )
-    def test_get_objects_catalog(self, conn, driver) -> None:
-        super().test_get_objects_catalog(conn, driver)
-
-    @pytest.mark.xfail(
-        reason="get_objects() catalog/schema always present in DataFusion"
-    )
-    def test_get_objects_schema(self, conn, driver) -> None:
-        super().test_get_objects_schema(conn, driver)
-
-    @pytest.mark.xfail(reason="get_objects() filter parameters not implemented")
-    def test_get_objects_table_invalid_catalog(
-        self, conn, driver, get_objects_table
-    ) -> None:
-        super().test_get_objects_table_invalid_catalog(conn, driver, get_objects_table)
-
-    @pytest.mark.xfail(reason="get_objects() filter parameters not implemented")
-    def test_get_objects_table_invalid_schema(
-        self, conn, driver, get_objects_table
-    ) -> None:
-        super().test_get_objects_table_invalid_schema(conn, driver, get_objects_table)
-
-    @pytest.mark.xfail(reason="get_objects() filter parameters not implemented")
-    def test_get_objects_table_invalid_table(
-        self, conn, driver, get_objects_table
-    ) -> None:
-        super().test_get_objects_table_invalid_table(conn, driver, get_objects_table)
-
-    @pytest.mark.xfail(reason="get_objects() column_name filter not implemented")
-    def test_get_objects_column_filter_column_name(
-        self, conn, driver, get_objects_table
-    ) -> None:
-        super().test_get_objects_column_filter_column_name(
-            conn, driver, get_objects_table
-        )
-
-    @pytest.mark.xfail(reason="get_objects() ordinal_position not populated")
-    def test_get_objects_column_xdbc(self, conn, driver, get_objects_table) -> None:
-        super().test_get_objects_column_xdbc(conn, driver, get_objects_table)
+    pass
