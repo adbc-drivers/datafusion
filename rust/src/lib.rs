@@ -40,7 +40,7 @@ use arrow_schema::{ArrowError, SchemaRef};
 
 use adbc_core::{
     Connection, Database, Driver, Optionable, Statement,
-    error::{Error, Result, Status},
+    error::Result,
     options::{
         InfoCode, IngestMode, OptionConnection, OptionDatabase, OptionStatement, OptionValue,
     },
@@ -192,13 +192,17 @@ pub struct DataFusionReader {
 }
 
 impl DataFusionReader {
-    pub async fn new(df: DataFrame) -> Self {
+    pub async fn new(df: DataFrame) -> std::result::Result<Self, DriverError> {
         let schema = df.schema().as_arrow().clone();
 
-        Self {
-            batches: df.collect().await.unwrap().into_iter(),
+        Ok(Self {
+            batches: df
+                .collect()
+                .await
+                .map_err(ErrorHelper::from_datafusion)?
+                .into_iter(),
             schema: schema.into(),
-        }
+        })
     }
 }
 
@@ -267,38 +271,23 @@ impl Optionable for DataFusionDatabase {
         key: Self::Option,
         _value: adbc_core::options::OptionValue,
     ) -> adbc_core::error::Result<()> {
-        Err(Error::with_message_and_status(
-            format!("Unrecognized option: {key:?}"),
-            Status::NotImplemented,
-        ))
+        Err(ErrorHelper::set_unknown_option(&key).to_adbc())
     }
 
     fn get_option_string(&self, key: Self::Option) -> adbc_core::error::Result<String> {
-        Err(Error::with_message_and_status(
-            format!("Unrecognized option: {key:?}"),
-            Status::NotFound,
-        ))
+        Err(ErrorHelper::get_unknown_option(&key).to_adbc())
     }
 
     fn get_option_bytes(&self, key: Self::Option) -> adbc_core::error::Result<Vec<u8>> {
-        Err(Error::with_message_and_status(
-            format!("Unrecognized option: {key:?}"),
-            Status::NotFound,
-        ))
+        Err(ErrorHelper::get_unknown_option(&key).to_adbc())
     }
 
     fn get_option_int(&self, key: Self::Option) -> adbc_core::error::Result<i64> {
-        Err(Error::with_message_and_status(
-            format!("Unrecognized option: {key:?}"),
-            Status::NotFound,
-        ))
+        Err(ErrorHelper::get_unknown_option(&key).to_adbc())
     }
 
     fn get_option_double(&self, key: Self::Option) -> adbc_core::error::Result<f64> {
-        Err(Error::with_message_and_status(
-            format!("Unrecognized option: {key:?}"),
-            Status::NotFound,
-        ))
+        Err(ErrorHelper::get_unknown_option(&key).to_adbc())
     }
 }
 
@@ -309,7 +298,12 @@ impl Database for DataFusionDatabase {
         let config = SessionConfig::new().with_information_schema(true);
         let ctx = SessionContext::new_with_config(config);
 
-        let runtime = Runtime::new(self.handle.clone()).unwrap();
+        let runtime = Runtime::new(self.handle.clone()).map_err(|e| {
+            ErrorHelper::io()
+                .context("create Tokio runtime")
+                .message(e.to_string())
+                .to_adbc()
+        })?;
 
         Ok(DataFusionConnection {
             runtime: Arc::new(runtime),
@@ -329,7 +323,12 @@ impl Database for DataFusionDatabase {
         let config = SessionConfig::new().with_information_schema(true);
         let ctx = SessionContext::new_with_config(config);
 
-        let runtime = Runtime::new(self.handle.clone()).unwrap();
+        let runtime = Runtime::new(self.handle.clone()).map_err(|e| {
+            ErrorHelper::io()
+                .context("create Tokio runtime")
+                .message(e.to_string())
+                .to_adbc()
+        })?;
 
         let mut connection = DataFusionConnection {
             runtime: Arc::new(runtime),
@@ -362,32 +361,41 @@ impl Optionable for DataFusionConnection {
                 OptionValue::String(value) => {
                     self.runtime.block_on(async {
                         let query = format!("SET datafusion.catalog.default_catalog = {value}");
-                        self.ctx.sql(query.as_str()).await.unwrap();
-                    });
+                        self.ctx
+                            .sql(query.as_str())
+                            .await
+                            .map_err(ErrorHelper::from_datafusion)?
+                            .collect()
+                            .await
+                            .map_err(ErrorHelper::from_datafusion)?;
+                        Ok::<_, adbc_core::error::Error>(())
+                    })?;
                     Ok(())
                 }
-                _ => Err(Error::with_message_and_status(
-                    "CurrentCatalog value must be of type String",
-                    Status::InvalidArguments,
-                )),
+                _ => Err(ErrorHelper::set_invalid_option(&key, &value)
+                    .message("must be a string")
+                    .to_adbc()),
             },
             constants::ADBC_CONNECTION_OPTION_CURRENT_DB_SCHEMA => match value {
                 OptionValue::String(value) => {
                     self.runtime.block_on(async {
                         let query = format!("SET datafusion.catalog.default_schema = {value}");
-                        self.ctx.sql(query.as_str()).await.unwrap();
-                    });
+                        self.ctx
+                            .sql(query.as_str())
+                            .await
+                            .map_err(ErrorHelper::from_datafusion)?
+                            .collect()
+                            .await
+                            .map_err(ErrorHelper::from_datafusion)?;
+                        Ok::<_, adbc_core::error::Error>(())
+                    })?;
                     Ok(())
                 }
-                _ => Err(Error::with_message_and_status(
-                    "CurrentSchema value must be of type String",
-                    Status::InvalidArguments,
-                )),
+                _ => Err(ErrorHelper::set_invalid_option(&key, &value)
+                    .message("must be a string")
+                    .to_adbc()),
             },
-            _ => Err(Error::with_message_and_status(
-                format!("Unrecognized option: {key:?}"),
-                Status::NotImplemented,
-            )),
+            _ => Err(ErrorHelper::set_unknown_option(&key).to_adbc()),
         }
     }
 
@@ -407,32 +415,20 @@ impl Optionable for DataFusionConnection {
                 .catalog
                 .default_schema
                 .clone()),
-            _ => Err(Error::with_message_and_status(
-                format!("Unrecognized option: {key:?}"),
-                Status::NotFound,
-            )),
+            _ => Err(ErrorHelper::get_unknown_option(&key).to_adbc()),
         }
     }
 
     fn get_option_bytes(&self, key: Self::Option) -> adbc_core::error::Result<Vec<u8>> {
-        Err(Error::with_message_and_status(
-            format!("Unrecognized option: {key:?}"),
-            Status::NotFound,
-        ))
+        Err(ErrorHelper::get_unknown_option(&key).to_adbc())
     }
 
     fn get_option_int(&self, key: Self::Option) -> adbc_core::error::Result<i64> {
-        Err(Error::with_message_and_status(
-            format!("Unrecognized option: {key:?}"),
-            Status::NotFound,
-        ))
+        Err(ErrorHelper::get_unknown_option(&key).to_adbc())
     }
 
     fn get_option_double(&self, key: Self::Option) -> adbc_core::error::Result<f64> {
-        Err(Error::with_message_and_status(
-            format!("Unrecognized option: {key:?}"),
-            Status::NotFound,
-        ))
+        Err(ErrorHelper::get_unknown_option(&key).to_adbc())
     }
 }
 
@@ -578,15 +574,11 @@ impl Optionable for DataFusionStatement {
         match key.as_ref() {
             constants::ADBC_INGEST_OPTION_TEMPORARY => match value {
                 OptionValue::String(v) if v == "false" => Ok(()),
-                _ => Err(Error::with_message_and_status(
-                    "temporary tables are not supported",
-                    Status::NotImplemented,
-                )),
+                _ => Err(ErrorHelper::not_implemented()
+                    .message("temporary tables are not supported")
+                    .to_adbc()),
             },
-            _ => Err(Error::with_message_and_status(
-                format!("Unrecognized option: {key:?}"),
-                Status::NotImplemented,
-            )),
+            _ => Err(ErrorHelper::set_unknown_option(&key).to_adbc()),
         }
     }
 
@@ -594,37 +586,24 @@ impl Optionable for DataFusionStatement {
         match key.as_ref() {
             constants::ADBC_INGEST_OPTION_TARGET_TABLE => match self.ingest.table {
                 Some(ref table) => Ok(table.clone()),
-                None => Err(Error::with_message_and_status(
-                    format!("{key:?} has not been set"),
-                    Status::NotFound,
-                )),
+                None => Err(ErrorHelper::not_found()
+                    .format(format_args!("{key:?} has not been set"))
+                    .to_adbc()),
             },
-            _ => Err(Error::with_message_and_status(
-                format!("Unrecognized option: {key:?}"),
-                Status::NotFound,
-            )),
+            _ => Err(ErrorHelper::get_unknown_option(&key).to_adbc()),
         }
     }
 
     fn get_option_bytes(&self, key: Self::Option) -> adbc_core::error::Result<Vec<u8>> {
-        Err(Error::with_message_and_status(
-            format!("Unrecognized option: {key:?}"),
-            Status::NotFound,
-        ))
+        Err(ErrorHelper::get_unknown_option(&key).to_adbc())
     }
 
     fn get_option_int(&self, key: Self::Option) -> adbc_core::error::Result<i64> {
-        Err(Error::with_message_and_status(
-            format!("Unrecognized option: {key:?}"),
-            Status::NotFound,
-        ))
+        Err(ErrorHelper::get_unknown_option(&key).to_adbc())
     }
 
     fn get_option_double(&self, key: Self::Option) -> adbc_core::error::Result<f64> {
-        Err(Error::with_message_and_status(
-            format!("Unrecognized option: {key:?}"),
-            Status::NotFound,
-        ))
+        Err(ErrorHelper::get_unknown_option(&key).to_adbc())
     }
 }
 
@@ -772,23 +751,26 @@ impl Statement for DataFusionStatement {
 
     fn execute(&mut self) -> Result<Box<dyn RecordBatchReader + Send>> {
         self.runtime.block_on(async {
-            let df = if self.sql_query.is_some() {
+            let df = if let Some(ref query) = self.sql_query {
                 self.ctx
-                    .sql(&self.sql_query.clone().unwrap())
+                    .sql(query)
                     .await
                     .map_err(ErrorHelper::from_datafusion)?
-            } else {
-                let plan =
-                    from_substrait_plan(&self.ctx.state(), &self.substrait_plan.clone().unwrap())
-                        .await
-                        .map_err(ErrorHelper::from_datafusion)?;
+            } else if let Some(ref plan) = self.substrait_plan {
+                let plan = from_substrait_plan(&self.ctx.state(), plan)
+                    .await
+                    .map_err(ErrorHelper::from_datafusion)?;
                 self.ctx
                     .execute_logical_plan(plan)
                     .await
                     .map_err(ErrorHelper::from_datafusion)?
+            } else {
+                return Err(ErrorHelper::invalid_state()
+                    .message("no query or Substrait plan has been set")
+                    .to_adbc());
             };
 
-            Ok(Box::new(DataFusionReader::new(df).await) as Box<dyn RecordBatchReader + Send>)
+            Ok(Box::new(DataFusionReader::new(df).await?) as Box<dyn RecordBatchReader + Send>)
         })
     }
 
@@ -805,7 +787,7 @@ impl Statement for DataFusionStatement {
                     .await
                     .map_err(ErrorHelper::from_datafusion)?;
                 df.collect().await.map_err(ErrorHelper::from_datafusion)?;
-                Ok::<_, Error>(())
+                Ok::<_, adbc_core::error::Error>(())
             })?;
         }
 
@@ -813,13 +795,17 @@ impl Statement for DataFusionStatement {
     }
 
     fn execute_schema(&mut self) -> adbc_core::error::Result<arrow_schema::Schema> {
+        let query = self.sql_query.as_ref().ok_or_else(|| {
+            ErrorHelper::invalid_state()
+                .message("no query has been set")
+                .to_adbc()
+        })?;
         self.runtime.block_on(async {
             let df = self
                 .ctx
-                .sql(&self.sql_query.clone().unwrap())
+                .sql(query)
                 .await
-                .unwrap();
-
+                .map_err(ErrorHelper::from_datafusion)?;
             Ok(df.schema().as_arrow().clone())
         })
     }
@@ -846,7 +832,12 @@ impl Statement for DataFusionStatement {
     }
 
     fn set_substrait_plan(&mut self, plan: impl AsRef<[u8]>) -> adbc_core::error::Result<()> {
-        self.substrait_plan = Some(Plan::decode(plan.as_ref()).unwrap());
+        self.substrait_plan = Some(Plan::decode(plan.as_ref()).map_err(|e| {
+            ErrorHelper::invalid_argument()
+                .context("decode Substrait plan")
+                .message(e.to_string())
+                .to_adbc()
+        })?);
         Ok(())
     }
 
