@@ -29,13 +29,13 @@ on:
     branches:
       - main
     paths:
-      - "rust/**"
+      - "**"
       - .github/workflows/rust_test.yaml
   push:
     branches:
       - main
     paths:
-      - "rust/**"
+      - "**"
       - .github/workflows/rust_test.yaml
 
 
@@ -91,7 +91,7 @@ jobs:
       - name: Build
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # zizmor: ignore[secrets-outside-env]
-        working-directory: rust
+        working-directory: .
         run: |
           if [[ -f ci/scripts/pre-build.sh ]]; then
             echo "Loading pre-build"
@@ -111,7 +111,7 @@ jobs:
         # Can't use Docker on macOS AArch64 runners, and Windows containers
         # work but often the container doesn't support Windows
         if: runner.os == 'Linux'
-        working-directory: rust
+        working-directory: .
         run: |
           if [[ -f compose.yaml ]]; then
             if ! docker compose up --detach --wait test-service; then
@@ -123,7 +123,7 @@ jobs:
           fi
 
       - name: Test
-        working-directory: rust
+        working-directory: .
         run: |
           set -a
           if [[ -f .env ]]; then
@@ -148,6 +148,10 @@ jobs:
             ./ci/scripts/post-test.sh
           fi
 
+      - name: clippy
+        working-directory: .
+        run: |
+          cargo clippy --locked --no-deps -- -A unused_variables -D warnings
 
   validate:
     name: "Validate datafusion ${{ matrix.vendor_version }}/${{ matrix.platform }}_${{ matrix.arch }}"
@@ -195,7 +199,7 @@ jobs:
       - name: Build Library
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # zizmor: ignore[secrets-outside-env]
-        working-directory: rust
+        working-directory: .
         run: |
           if [[ -f ci/scripts/pre-build.sh ]]; then
             ./ci/scripts/pre-build.sh test ${{ matrix.platform }} ${{ matrix.arch }}
@@ -214,7 +218,7 @@ jobs:
         # Can't use Docker on macOS AArch64 runners, and Windows containers
         # work but often the container doesn't support Windows
         if: runner.os == 'Linux'
-        working-directory: rust
+        working-directory: .
         run: |
           if [[ -f compose.yaml ]]; then
             if ! docker compose up --detach --wait ${{ matrix.service_name }}; then
@@ -227,7 +231,7 @@ jobs:
 
       - name: Validate
         if: runner.os == 'Linux'
-        working-directory: rust
+        working-directory: .
         run: |
           set -a
           if [[ -f .env ]]; then
@@ -262,18 +266,18 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: validation-report-${{ matrix.vendor_version }}
-          path: "rust/validation-report-${{ matrix.vendor_version }}.xml"
+          path: "./validation-report-${{ matrix.vendor_version }}.xml"
           retention-days: 7
 
       - name: Generate docs
-        working-directory: rust
+        working-directory: .
         run: |
           pixi run gendocs --output generated
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: docs-${{ matrix.vendor_version }}
-          path: "rust/generated/datafusion.md"
+          path: "./generated/datafusion.md"
           retention-days: 7
 
   build:
@@ -310,7 +314,7 @@ jobs:
           run-install: false
 
       - name: Install dev tools
-        working-directory: rust
+        working-directory: .
         run: |
           pixi install
 
@@ -322,7 +326,7 @@ jobs:
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
 
       - name: Build Library
-        working-directory: rust
+        working-directory: .
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # zizmor: ignore[secrets-outside-env]
         run: |
@@ -342,7 +346,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: drivers-${{ matrix.platform }}-${{ matrix.arch }}
-          path: "rust/build/libadbc_driver_datafusion.*"
+          path: "./build/libadbc_driver_datafusion.*"
           retention-days: 2
 
   package:
@@ -377,12 +381,12 @@ jobs:
           path: "~/drivers"
 
       - name: Install tools
-        working-directory: rust
+        working-directory: .
         run: |
           cargo install cargo-about@0.9.0 --locked -F cli
 
       - name: Generate packages
-        working-directory: rust
+        working-directory: .
         run: |
           pixi install
 
@@ -408,7 +412,7 @@ jobs:
           path: "~/validation-report"
 
       - name: Generate combined docs
-        working-directory: rust
+        working-directory: .
         run: |
           ls -laR ~/validation-report
           find ~/validation-report -type f -name '*.xml'
@@ -419,7 +423,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: docs
-          path: "rust/generated/datafusion.md"
+          path: "./generated/datafusion.md"
           retention-days: 2
 
   test-packages:
@@ -469,7 +473,7 @@ jobs:
       - name: load package
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # zizmor: ignore[secrets-outside-env]
-        working-directory: rust
+        working-directory: .
         run: |
           if [[ -f ci/scripts/pre-build.sh ]]; then
             echo "Loading pre-build"
@@ -521,10 +525,10 @@ jobs:
       - name: Release (dry-run)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        working-directory: rust
+        working-directory: .
         run: |
-          git tag rust/v1000.0.0
-          tag=rust/v1000.0.0
+          git tag v1000.0.0
+          tag=v1000.0.0
 
           pixi run release --dry-run $(pwd) $tag
           echo gh release upload $tag $(find ~/packages -name '*.tar.gz') $(find ~/packages -name 'manifest.yaml') $(find ~/packages -name '*.md')
