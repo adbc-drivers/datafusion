@@ -14,28 +14,8 @@
 
 // part: metadata
 
+[setup]
+drop = "test_float32"
+
 [tags]
-sql-type-name = "TIMESTAMP WITH TIME ZONE"
-
-// part: expected_schema
-
-{
-    "format": "+s",
-    "children": [
-        {
-            "name": "idx",
-            "format": "l",
-            "flags": ["nullable"]
-        },
-        {
-            "name": "value",
-            "format": "tsn:UTC",
-            "flags": ["nullable"]
-        },
-        {
-            "name": "value2",
-            "format": "tsn:Asia/Tokyo",
-            "flags": ["nullable"]
-        }
-    ]
-}
+sql-type-name = "FLOAT"
