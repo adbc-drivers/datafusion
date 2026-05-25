@@ -32,7 +32,6 @@ Policy](https://github.com/adbc-drivers/datafusion?tab=security-ov-file#readme).
 ## Build and Test
 
 For basic development, the driver can be built and tested like any Rust project.
-From the `rust/` subdirectory:
 
 ```shell
 $ cargo build
@@ -48,7 +47,7 @@ $ pixi run make
 ```
 
 To run the validation suite, you will first need to build the shared library.
-Finally, from the `rust/` subdirectory:
+Then run:
 
 ```shell
 $ pixi run validate
@@ -81,14 +80,13 @@ When writing the pull request description:
 
 - Ensure the title follows [Conventional
   Commits](https://www.conventionalcommits.org/en/v1.0.0/) format.  The
-  component should be `rust` if it affects the Go driver, or it can be omitted
-  for general maintenance (in general: it should be a directory path relative
-  to the repo root, e.g. `rust/auth` would also be valid if that directory
+  component can be omitted (in general: it should be a directory path relative
+  to the repo root, e.g. `auth` would also be valid if that directory
   existed).  Example titles:
 
-  - `feat(rust): support new data type`
+  - `feat: support new data type`
   - `chore: update action versions`
-  - `fix!:(rust) return ns instead of us`
+  - `fix!: return ns instead of us`
 
   Ensure that breaking changes are appropriately flagged with a `!` as seen
   in the last example above.
