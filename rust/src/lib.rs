@@ -25,6 +25,7 @@ use adbc_core::constants;
 use datafusion::common::TableReference;
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::datasource::MemTable;
+use datafusion::logical_expr::LogicalPlan;
 use datafusion::logical_expr::dml::InsertOp;
 use datafusion::prelude::*;
 use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
@@ -462,8 +463,7 @@ impl Connection for DataFusionConnection {
         Ok(DataFusionStatement {
             runtime: self.runtime.clone(),
             ctx: self.ctx.clone(),
-            sql_query: None,
-            substrait_plan: None,
+            query: None,
             bound_batches: None,
             bound_schema: None,
             ingest: BulkIngestState::new(),
@@ -546,11 +546,16 @@ impl Connection for DataFusionConnection {
     }
 }
 
+enum QueryState {
+    Sql(String),
+    Substrait(Plan),
+    Prepared(LogicalPlan),
+}
+
 pub struct DataFusionStatement {
     runtime: Arc<Runtime>,
     ctx: Arc<SessionContext>,
-    sql_query: Option<String>,
-    substrait_plan: Option<Plan>,
+    query: Option<QueryState>,
     bound_batches: Option<Vec<RecordBatch>>,
     bound_schema: Option<SchemaRef>,
     ingest: BulkIngestState<ErrorHelper>,
@@ -751,23 +756,31 @@ impl Statement for DataFusionStatement {
 
     fn execute(&mut self) -> Result<Box<dyn RecordBatchReader + Send>> {
         self.runtime.block_on(async {
-            let df = if let Some(ref query) = self.sql_query {
-                self.ctx
+            let df = match &self.query {
+                Some(QueryState::Sql(query)) => self
+                    .ctx
                     .sql(query)
                     .await
-                    .map_err(ErrorHelper::from_datafusion)?
-            } else if let Some(ref plan) = self.substrait_plan {
-                let plan = from_substrait_plan(&self.ctx.state(), plan)
+                    .map_err(ErrorHelper::from_datafusion)?,
+                Some(QueryState::Substrait(plan)) => {
+                    let plan = from_substrait_plan(&self.ctx.state(), plan)
+                        .await
+                        .map_err(ErrorHelper::from_datafusion)?;
+                    self.ctx
+                        .execute_logical_plan(plan)
+                        .await
+                        .map_err(ErrorHelper::from_datafusion)?
+                }
+                Some(QueryState::Prepared(plan)) => self
+                    .ctx
+                    .execute_logical_plan(plan.clone())
                     .await
-                    .map_err(ErrorHelper::from_datafusion)?;
-                self.ctx
-                    .execute_logical_plan(plan)
-                    .await
-                    .map_err(ErrorHelper::from_datafusion)?
-            } else {
-                return Err(ErrorHelper::invalid_state()
-                    .message("no query or Substrait plan has been set")
-                    .to_adbc());
+                    .map_err(ErrorHelper::from_datafusion)?,
+                None => {
+                    return Err(ErrorHelper::invalid_state()
+                        .message("no query or Substrait plan has been set")
+                        .to_adbc());
+                }
             };
 
             Ok(Box::new(DataFusionReader::new(df).await?) as Box<dyn RecordBatchReader + Send>)
@@ -779,34 +792,62 @@ impl Statement for DataFusionStatement {
             return self.execute_bulk_ingest();
         }
 
-        if let Some(ref query) = self.sql_query {
-            self.runtime.block_on(async {
-                let df = self
+        self.runtime.block_on(async {
+            let df = match &self.query {
+                Some(QueryState::Sql(query)) => self
                     .ctx
                     .sql(query)
                     .await
-                    .map_err(ErrorHelper::from_datafusion)?;
-                df.collect().await.map_err(ErrorHelper::from_datafusion)?;
-                Ok::<_, adbc_core::error::Error>(())
-            })?;
-        }
+                    .map_err(ErrorHelper::from_datafusion)?,
+                Some(QueryState::Substrait(plan)) => {
+                    let plan = from_substrait_plan(&self.ctx.state(), plan)
+                        .await
+                        .map_err(ErrorHelper::from_datafusion)?;
+                    self.ctx
+                        .execute_logical_plan(plan)
+                        .await
+                        .map_err(ErrorHelper::from_datafusion)?
+                }
+                Some(QueryState::Prepared(plan)) => self
+                    .ctx
+                    .execute_logical_plan(plan.clone())
+                    .await
+                    .map_err(ErrorHelper::from_datafusion)?,
+                None => {
+                    return Err(ErrorHelper::invalid_state()
+                        .message("no query or Substrait plan has been set")
+                        .to_adbc());
+                }
+            };
+            df.collect().await.map_err(ErrorHelper::from_datafusion)?;
+            Ok::<_, adbc_core::error::Error>(())
+        })?;
 
         Ok(Some(0))
     }
 
     fn execute_schema(&mut self) -> adbc_core::error::Result<arrow_schema::Schema> {
-        let query = self.sql_query.as_ref().ok_or_else(|| {
-            ErrorHelper::invalid_state()
-                .message("no query has been set")
-                .to_adbc()
-        })?;
         self.runtime.block_on(async {
-            let df = self
-                .ctx
-                .sql(query)
-                .await
-                .map_err(ErrorHelper::from_datafusion)?;
-            Ok(df.schema().as_arrow().clone())
+            match &self.query {
+                Some(QueryState::Sql(query)) => {
+                    let df = self
+                        .ctx
+                        .sql(query)
+                        .await
+                        .map_err(ErrorHelper::from_datafusion)?;
+                    Ok(df.schema().as_arrow().clone())
+                }
+                Some(QueryState::Substrait(plan)) => {
+                    let plan = from_substrait_plan(&self.ctx.state(), plan)
+                        .await
+                        .map_err(ErrorHelper::from_datafusion)?;
+                    Ok(plan.schema().as_arrow().clone())
+                }
+                Some(QueryState::Prepared(plan)) => Ok(plan.schema().as_arrow().clone()),
+                None => Err(ErrorHelper::invalid_state()
+                    .message("no query has been set")
+                    .to_adbc()),
+            }
         })
     }
 
@@ -823,21 +864,51 @@ impl Statement for DataFusionStatement {
     }
 
     fn prepare(&mut self) -> adbc_core::error::Result<()> {
-        Err(ErrorHelper::not_implemented().message("prepare").to_adbc())
+        match self.query.take() {
+            Some(QueryState::Sql(sql)) => {
+                let plan = self.runtime.block_on(async {
+                    self.ctx
+                        .state()
+                        .create_logical_plan(&sql)
+                        .await
+                        .map_err(ErrorHelper::from_datafusion)
+                })?;
+                self.query = Some(QueryState::Prepared(plan));
+            }
+            Some(QueryState::Substrait(plan)) => {
+                let logical_plan = self.runtime.block_on(async {
+                    from_substrait_plan(&self.ctx.state(), &plan)
+                        .await
+                        .map_err(ErrorHelper::from_datafusion)
+                })?;
+                self.query = Some(QueryState::Prepared(logical_plan));
+            }
+            Some(prepared @ QueryState::Prepared(_)) => {
+                self.query = Some(prepared);
+            }
+            None => {
+                return Err(ErrorHelper::invalid_state()
+                    .message("no query has been set")
+                    .to_adbc());
+            }
+        }
+        Ok(())
     }
 
     fn set_sql_query(&mut self, query: impl AsRef<str>) -> adbc_core::error::Result<()> {
-        self.sql_query = Some(query.as_ref().to_string());
+        self.query = Some(QueryState::Sql(query.as_ref().to_string()));
         Ok(())
     }
 
     fn set_substrait_plan(&mut self, plan: impl AsRef<[u8]>) -> adbc_core::error::Result<()> {
-        self.substrait_plan = Some(Plan::decode(plan.as_ref()).map_err(|e| {
-            ErrorHelper::invalid_argument()
-                .context("decode Substrait plan")
-                .message(e.to_string())
-                .to_adbc()
-        })?);
+        self.query = Some(QueryState::Substrait(Plan::decode(plan.as_ref()).map_err(
+            |e| {
+                ErrorHelper::invalid_argument()
+                    .context("decode Substrait plan")
+                    .message(e.to_string())
+                    .to_adbc()
+            },
+        )?));
         Ok(())
     }
 

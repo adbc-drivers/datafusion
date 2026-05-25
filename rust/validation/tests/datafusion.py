@@ -27,6 +27,7 @@ class DataFusionQuirks(model.DriverQuirks):
     short_version = "53"
     features = model.DriverFeatures(
         statement_bind=False,
+        statement_prepare=True,
         current_catalog="datafusion",
         current_schema="public",
         get_objects=True,
