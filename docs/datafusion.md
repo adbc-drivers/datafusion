@@ -59,3 +59,5 @@ Note: The example above is for Python using the [adbc-driver-manager](https://py
 ## Compatibility
 
 {{ compatibility_info|safe }}
+
+[datafusion]: https://datafusion.apache.org/
