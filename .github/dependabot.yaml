@@ -26,6 +26,8 @@ updates:
           - "adbc_*"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
 
   - package-ecosystem: "github-actions"
     commit-message:
@@ -37,3 +39,5 @@ updates:
           - "*"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7

@@ -26,13 +26,14 @@ if __name__ == "__main__":
     template = Path(__file__).parent.parent.parent / "docs/datafusion.md"
     template = template.resolve()
 
+    reports = [report.resolve() for report in Path(".").glob("validation-report*.xml")]
     generate_documentation.generate(
         "datafusion",
         lambda version, vendor: datafusion.get_quirks(version),
         [
             ("datafusion", "Apache DataFusion"),
         ],
-        [Path("validation-report.xml").resolve()],
+        reports,
         template,
         args.output.resolve(),
     )

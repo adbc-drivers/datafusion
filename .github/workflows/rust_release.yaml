@@ -74,7 +74,7 @@ jobs:
           cache: false
           components: "clippy"
 
-      - uses: prefix-dev/setup-pixi@1b2de7f3351f171c8b4dfeb558c639cb58ed4ec0  # v0.9.5
+      - uses: prefix-dev/setup-pixi@5185adfbffb4bd703da3010310260805d89ebb11  # v0.9.6
         with:
           pixi-version: v0.63.2
           run-install: false
@@ -171,7 +171,7 @@ jobs:
           cache: false
           components: "clippy"
 
-      - uses: prefix-dev/setup-pixi@1b2de7f3351f171c8b4dfeb558c639cb58ed4ec0  # v0.9.5
+      - uses: prefix-dev/setup-pixi@5185adfbffb4bd703da3010310260805d89ebb11  # v0.9.6
         with:
           pixi-version: v0.63.2
           run-install: false
@@ -296,7 +296,7 @@ jobs:
           cache: false
           components: "clippy"
 
-      - uses: prefix-dev/setup-pixi@1b2de7f3351f171c8b4dfeb558c639cb58ed4ec0  # v0.9.5
+      - uses: prefix-dev/setup-pixi@5185adfbffb4bd703da3010310260805d89ebb11  # v0.9.6
         with:
           pixi-version: v0.63.2
           run-install: false
@@ -330,7 +330,7 @@ jobs:
             source .env.release
           fi
           set +a
-          pixi run adbc-make check CI=true VERBOSE=true DRIVER=datafusion IMPL_LANG=rust RELEASE=true
+          pixi run adbc-make check CI=true VERBOSE=true DRIVER=datafusion IMPL_LANG=rust  RELEASE=true
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: drivers-${{ matrix.platform }}-${{ matrix.arch }}
@@ -358,7 +358,7 @@ jobs:
           cache: false
           components: "clippy"
 
-      - uses: prefix-dev/setup-pixi@1b2de7f3351f171c8b4dfeb558c639cb58ed4ec0  # v0.9.5
+      - uses: prefix-dev/setup-pixi@5185adfbffb4bd703da3010310260805d89ebb11  # v0.9.6
         with:
           pixi-version: v0.63.2
           run-install: false
@@ -432,7 +432,7 @@ jobs:
         with:
           cache: false
           go-version: 'stable'
-      - uses: prefix-dev/setup-pixi@1b2de7f3351f171c8b4dfeb558c639cb58ed4ec0  # v0.9.5
+      - uses: prefix-dev/setup-pixi@5185adfbffb4bd703da3010310260805d89ebb11  # v0.9.6
         with:
           pixi-version: v0.63.2
           run-install: false
@@ -495,7 +495,7 @@ jobs:
           persist-credentials: false
           submodules: 'recursive'
 
-      - uses: prefix-dev/setup-pixi@1b2de7f3351f171c8b4dfeb558c639cb58ed4ec0  # v0.9.5
+      - uses: prefix-dev/setup-pixi@5185adfbffb4bd703da3010310260805d89ebb11  # v0.9.6
         with:
           pixi-version: v0.63.2
           run-install: false
