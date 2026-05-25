@@ -12,7 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// part: metadata
+// part: expected_schema
 
-[tags]
-broken_vendor = "DataFusion normalizes all timezones to UTC"
+{
+    "format": "+s",
+    "children": [
+        {
+            "name": "idx",
+            "format": "l",
+            "flags": ["nullable"]
+        },
+        {
+            "name": "value",
+            "format": "tss:UTC",
+            "flags": ["nullable"]
+        },
+        {
+            "name": "value2",
+            "format": "tss:Asia/Tokyo",
+            "flags": ["nullable"]
+        }
+    ]
+}

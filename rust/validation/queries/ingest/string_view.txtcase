@@ -12,7 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// part: metadata
+// part: expected_schema
 
-[tags]
-broken_vendor = "DataFusion preserves string_view instead of converting to string"
+{
+    "format": "+s",
+    "children": [
+        {
+            "name": "idx",
+            "format": "l",
+            "flags": ["nullable"]
+        },
+        {
+            "name": "value",
+            "format": "vu",
+            "flags": ["nullable"]
+        }
+    ]
+}
