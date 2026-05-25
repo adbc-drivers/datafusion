@@ -450,7 +450,7 @@ fn get_info_codes() -> &'static driverbase::InfoRegistry {
         registry.add_string(InfoCode::VendorVersion, datafusion::DATAFUSION_VERSION);
         registry.add_string(
             InfoCode::DriverArrowVersion,
-            &format!("v{}", datafusion::arrow::ARROW_VERSION),
+            format!("v{}", datafusion::arrow::ARROW_VERSION),
         );
         registry
     })
