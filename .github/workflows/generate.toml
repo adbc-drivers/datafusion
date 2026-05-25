@@ -16,8 +16,8 @@
 driver = "datafusion"
 private = false
 
-[lang]
-rust = true
+[lang.rust]
+subdir = "."
 
 [secrets]
 # so we can use gh CLI to download protoc without rate limits

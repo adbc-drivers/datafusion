@@ -13,8 +13,7 @@
 # limitations under the License.
 
 .github/workflows/dev_issues.yaml
-rust/Cargo.toml
-rust/README.md
-rust/src/lib.rs
-rust/tests/test_datafusion.rs
+Cargo.toml
+src/lib.rs
+tests/test_datafusion.rs
 README.md
