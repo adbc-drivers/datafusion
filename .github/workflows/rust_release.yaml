@@ -140,6 +140,10 @@ jobs:
             ./ci/scripts/post-test.sh
           fi
 
+      - name: clippy
+        working-directory: .
+        run: |
+          cargo clippy --locked --no-deps -- -A unused_variables -D warnings
 
   validate:
     name: "Validate datafusion ${{ matrix.vendor_version }}/${{ matrix.platform }}_${{ matrix.arch }}"

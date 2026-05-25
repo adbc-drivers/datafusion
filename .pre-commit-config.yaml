@@ -63,5 +63,5 @@ repos:
     name: cargo fmt
     language: system
     types: [rust]
-    entry: bash -c 'cd rust && cargo +stable fmt --all'
+    entry: bash -c 'cargo +stable fmt --all'
     pass_filenames: false
