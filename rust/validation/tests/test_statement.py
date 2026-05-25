@@ -24,11 +24,7 @@ def pytest_generate_tests(metafunc) -> None:
 
 
 class TestStatement(statement_tests.TestStatement):
-    @pytest.mark.xfail(reason="prepare() not implemented")
-    def test_prepare(self, driver, conn) -> None:
-        super().test_prepare(driver, conn)
-
-    @pytest.mark.xfail(reason="prepare() not implemented")
+    @pytest.mark.xfail(reason="bind parameters not implemented")
     def test_parameter_execute(self, driver, conn) -> None:
         super().test_parameter_execute(driver, conn)
 
