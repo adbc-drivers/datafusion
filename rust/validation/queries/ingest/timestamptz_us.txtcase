@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// part: metadata
+
+[tags]
+sql-type-name = "TIMESTAMP WITH TIME ZONE"
+
 // part: expected_schema
 
 {
