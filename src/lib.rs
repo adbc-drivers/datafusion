@@ -471,7 +471,7 @@ impl Connection for DataFusionConnection {
     }
 
     fn cancel(&mut self) -> adbc_core::error::Result<()> {
-        todo!()
+        Err(ErrorHelper::not_implemented().message("cancel").to_adbc())
     }
 
     fn get_info(
@@ -509,15 +509,21 @@ impl Connection for DataFusionConnection {
         _db_schema: Option<&str>,
         _table_name: &str,
     ) -> adbc_core::error::Result<arrow_schema::Schema> {
-        todo!()
+        Err(ErrorHelper::not_implemented()
+            .message("get_table_schema")
+            .to_adbc())
     }
 
     fn get_table_types(&self) -> Result<Box<dyn RecordBatchReader + Send>> {
-        todo!()
+        Err(ErrorHelper::not_implemented()
+            .message("get_table_types")
+            .to_adbc())
     }
 
     fn get_statistic_names(&self) -> Result<Box<dyn RecordBatchReader + Send>> {
-        todo!()
+        Err(ErrorHelper::not_implemented()
+            .message("get_statistic_names")
+            .to_adbc())
     }
 
     fn get_statistics(
@@ -527,22 +533,26 @@ impl Connection for DataFusionConnection {
         _table_name: Option<&str>,
         _approximate: bool,
     ) -> Result<Box<dyn RecordBatchReader + Send>> {
-        todo!()
+        Err(ErrorHelper::not_implemented()
+            .message("get_statistics")
+            .to_adbc())
     }
 
     fn commit(&mut self) -> adbc_core::error::Result<()> {
-        todo!()
+        Err(ErrorHelper::not_implemented().message("commit").to_adbc())
     }
 
     fn rollback(&mut self) -> adbc_core::error::Result<()> {
-        todo!()
+        Err(ErrorHelper::not_implemented().message("rollback").to_adbc())
     }
 
     fn read_partition(
         &self,
         _partition: impl AsRef<[u8]>,
     ) -> Result<Box<dyn RecordBatchReader + Send>> {
-        todo!()
+        Err(ErrorHelper::not_implemented()
+            .message("read_partition")
+            .to_adbc())
     }
 }
 
