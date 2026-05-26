@@ -33,6 +33,7 @@ class DataFusionQuirks(model.DriverQuirks):
         get_objects=True,
         statement_bulk_ingest=True,
         statement_rows_affected=True,
+        statement_execute_schema=True,
     )
     setup = model.DriverSetup(
         database={},
