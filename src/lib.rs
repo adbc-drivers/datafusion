@@ -236,8 +236,11 @@ impl Driver for DataFusionDriver {
     type DatabaseType = DataFusionDatabase;
 
     fn new_database(&mut self) -> Result<Self::DatabaseType> {
+        let config = SessionConfig::new().with_information_schema(true);
+        let ctx = SessionContext::new_with_config(config);
         Ok(Self::DatabaseType {
             handle: self.handle.clone(),
+            ctx: Arc::new(ctx),
         })
     }
 
@@ -250,8 +253,11 @@ impl Driver for DataFusionDriver {
             ),
         >,
     ) -> adbc_core::error::Result<Self::DatabaseType> {
+        let config = SessionConfig::new().with_information_schema(true);
+        let ctx = SessionContext::new_with_config(config);
         let mut database = Self::DatabaseType {
             handle: self.handle.clone(),
+            ctx: Arc::new(ctx),
         };
         for (key, value) in opts {
             database.set_option(key, value)?;
@@ -262,6 +268,7 @@ impl Driver for DataFusionDriver {
 
 pub struct DataFusionDatabase {
     handle: Option<tokio::runtime::Handle>,
+    ctx: Arc<SessionContext>,
 }
 
 impl Optionable for DataFusionDatabase {
@@ -296,9 +303,6 @@ impl Database for DataFusionDatabase {
     type ConnectionType = DataFusionConnection;
 
     fn new_connection(&self) -> Result<Self::ConnectionType> {
-        let config = SessionConfig::new().with_information_schema(true);
-        let ctx = SessionContext::new_with_config(config);
-
         let runtime = Runtime::new(self.handle.clone()).map_err(|e| {
             ErrorHelper::io()
                 .context("create Tokio runtime")
@@ -308,7 +312,7 @@ impl Database for DataFusionDatabase {
 
         Ok(DataFusionConnection {
             runtime: Arc::new(runtime),
-            ctx: Arc::new(ctx),
+            ctx: self.ctx.clone(),
         })
     }
 
@@ -321,9 +325,6 @@ impl Database for DataFusionDatabase {
             ),
         >,
     ) -> adbc_core::error::Result<Self::ConnectionType> {
-        let config = SessionConfig::new().with_information_schema(true);
-        let ctx = SessionContext::new_with_config(config);
-
         let runtime = Runtime::new(self.handle.clone()).map_err(|e| {
             ErrorHelper::io()
                 .context("create Tokio runtime")
@@ -333,7 +334,7 @@ impl Database for DataFusionDatabase {
 
         let mut connection = DataFusionConnection {
             runtime: Arc::new(runtime),
-            ctx: Arc::new(ctx),
+            ctx: self.ctx.clone(),
         };
 
         for (key, value) in opts {
@@ -360,6 +361,12 @@ impl Optionable for DataFusionConnection {
         match key.as_ref() {
             constants::ADBC_CONNECTION_OPTION_CURRENT_CATALOG => match value {
                 OptionValue::String(value) => {
+                    if !self.ctx.catalog_names().contains(&value) {
+                        return Err(ErrorHelper::not_found()
+                            .context("set current catalog")
+                            .format(format_args!("catalog '{value}' does not exist"))
+                            .to_adbc());
+                    }
                     self.runtime.block_on(async {
                         let query = format!("SET datafusion.catalog.default_catalog = {value}");
                         self.ctx
@@ -379,6 +386,22 @@ impl Optionable for DataFusionConnection {
             },
             constants::ADBC_CONNECTION_OPTION_CURRENT_DB_SCHEMA => match value {
                 OptionValue::String(value) => {
+                    let state = self.ctx.state();
+                    let catalog_name = &state.config_options().catalog.default_catalog;
+                    let catalog = self.ctx.catalog(catalog_name).ok_or_else(|| {
+                        ErrorHelper::not_found()
+                            .context("set current schema")
+                            .format(format_args!("catalog '{catalog_name}' does not exist"))
+                            .to_adbc()
+                    })?;
+                    if !catalog.schema_names().contains(&value) {
+                        return Err(ErrorHelper::not_found()
+                            .context("set current schema")
+                            .format(format_args!(
+                                "schema '{value}' does not exist in catalog '{catalog_name}'"
+                            ))
+                            .to_adbc());
+                    }
                     self.runtime.block_on(async {
                         let query = format!("SET datafusion.catalog.default_schema = {value}");
                         self.ctx

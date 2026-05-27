@@ -13,14 +13,16 @@
 # limitations under the License.
 
 import sys
+import typing
 from pathlib import Path
 
+import adbc_driver_manager
+import adbc_driver_manager.dbapi
 import adbc_drivers_validation.model
 import adbc_drivers_validation.tests.conftest
 import pytest
 from adbc_drivers_validation.tests.conftest import (  # noqa: F401
     conn,
-    conn_factory,
     db_kwargs,
     manual_test,
     pytest_collection_modifyitems,
@@ -51,3 +53,36 @@ def driver_path(driver: adbc_drivers_validation.model.DriverQuirks) -> str:
         Path(__file__).parent.parent.parent
         / f"build/libadbc_driver_{driver.name}.{ext}"
     )
+
+
+@pytest.fixture(scope="session")
+def conn_factory(
+    driver_path: str,
+    db_kwargs: dict[str, typing.Any],  # noqa:F811
+) -> typing.Callable[[], adbc_driver_manager.dbapi.Connection]:
+    kwargs = db_kwargs.copy()
+    kwargs["driver"] = driver_path
+    db = adbc_driver_manager.AdbcDatabase(**kwargs)
+    shared_db = adbc_driver_manager.dbapi._SharedDatabase(db)
+
+    def _factory() -> adbc_driver_manager.dbapi.Connection:
+        adbc_conn = adbc_driver_manager.AdbcConnection(db)
+        return adbc_driver_manager.dbapi.Connection(
+            shared_db, adbc_conn, autocommit=True
+        )
+
+    return _factory
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _setup_resources(
+    conn_factory: typing.Callable[[], adbc_driver_manager.dbapi.Connection],
+) -> None:
+    with conn_factory() as c:
+        with c.cursor() as cursor:
+            for statement in [
+                "CREATE SCHEMA IF NOT EXISTS secondary",
+                "CREATE DATABASE IF NOT EXISTS secondary_catalog",
+                "CREATE SCHEMA IF NOT EXISTS secondary_catalog.secondary_schema",
+            ]:
+                cursor.execute(statement)
