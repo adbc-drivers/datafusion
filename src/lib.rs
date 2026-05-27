@@ -505,13 +505,24 @@ impl Connection for DataFusionConnection {
 
     fn get_table_schema(
         &self,
-        _catalog: Option<&str>,
-        _db_schema: Option<&str>,
-        _table_name: &str,
+        catalog: Option<&str>,
+        db_schema: Option<&str>,
+        table_name: &str,
     ) -> adbc_core::error::Result<arrow_schema::Schema> {
-        Err(ErrorHelper::not_implemented()
-            .message("get_table_schema")
-            .to_adbc())
+        let table_ref = match (catalog, db_schema) {
+            (Some(catalog), Some(schema)) => TableReference::full(catalog, schema, table_name),
+            (None, Some(schema)) => TableReference::partial(schema, table_name),
+            _ => TableReference::bare(table_name),
+        };
+
+        self.runtime.block_on(async {
+            let provider = self.ctx.table_provider(table_ref).await.map_err(|e| {
+                ErrorHelper::not_found()
+                    .context("get table schema")
+                    .message(e.to_string())
+            })?;
+            Ok(provider.schema().as_ref().clone())
+        })
     }
 
     fn get_table_types(&self) -> Result<Box<dyn RecordBatchReader + Send>> {

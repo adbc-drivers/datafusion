@@ -30,6 +30,7 @@ class DataFusionQuirks(model.DriverQuirks):
         statement_prepare=True,
         current_catalog="datafusion",
         current_schema="public",
+        connection_get_table_schema=True,
         get_objects=True,
         statement_bulk_ingest=True,
         statement_rows_affected=True,
