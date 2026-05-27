@@ -17,9 +17,7 @@ import pyarrow
 
 
 def test_package() -> None:
-    with adbc_driver_manager.dbapi.connect(
-        driver="datafusion", autocommit=True
-    ) as conn:
+    with adbc_driver_manager.dbapi.connect("datafusion://", autocommit=True) as conn:
         with conn.cursor() as cursor:
             cursor.adbc_statement.set_sql_query("SELECT 1")
             handle, _ = cursor.adbc_statement.execute_query()

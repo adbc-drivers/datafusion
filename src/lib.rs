@@ -284,9 +284,22 @@ impl Optionable for DataFusionDatabase {
     fn set_option(
         &mut self,
         key: Self::Option,
-        _value: adbc_core::options::OptionValue,
+        value: adbc_core::options::OptionValue,
     ) -> adbc_core::error::Result<()> {
-        Err(ErrorHelper::set_unknown_option(&key).to_adbc())
+        match key {
+            OptionDatabase::Uri => {
+                // only support "datafusion://" for now
+                let uri = ErrorHelper::option_as_string(&key, &value).map_err(|e| e.to_adbc())?;
+                if uri == "datafusion://" {
+                    Ok(())
+                } else {
+                    Err(ErrorHelper::set_invalid_option(&key, &value)
+                        .message("only 'datafusion://' is accepted")
+                        .to_adbc())
+                }
+            }
+            _ => Err(ErrorHelper::set_unknown_option(&key).to_adbc()),
+        }
     }
 
     fn get_option_string(&self, key: Self::Option) -> adbc_core::error::Result<String> {

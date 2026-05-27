@@ -13,6 +13,7 @@
 # limitations under the License.
 
 
+import adbc_driver_manager.dbapi
 import adbc_drivers_validation.tests.connection as connection_tests
 
 from . import datafusion
@@ -25,3 +26,15 @@ def pytest_generate_tests(metafunc) -> None:
 
 class TestConnection(connection_tests.TestConnection):
     pass
+
+
+def test_uri(driver, driver_path) -> None:
+    with adbc_driver_manager.dbapi.connect(
+        driver=driver_path,
+        uri="datafusion://",
+        autocommit=True,
+    ) as conn:
+        with conn.cursor() as cursor:
+            cursor.adbc_statement.set_sql_query("SELECT 1")
+            handle, _ = cursor.adbc_statement.execute_query()
+            assert handle is not None
