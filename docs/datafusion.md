@@ -44,6 +44,14 @@ from adbc_driver_manager import dbapi
 dbapi.connect(driver="datafusion")
 ```
 
+You can provide the URI `datafusion://`, but no other URI is currently accepted:
+
+```python
+from adbc_driver_manager import dbapi
+
+dbapi.connect("datafusion://")
+```
+
 Note: The example above is for Python using the [adbc-driver-manager](https://pypi.org/project/adbc-driver-manager) package but the process will be similar for other driver managers.  See [adbc-quickstarts](https://github.com/columnar-tech/adbc-quickstarts).
 
 ## Feature & Type Support
