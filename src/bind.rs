@@ -13,13 +13,13 @@
 // limitations under the License.
 
 use std::sync::Arc;
-use std::vec::IntoIter;
 
 use arrow_array::{RecordBatch, RecordBatchReader};
 use arrow_schema::{ArrowError, SchemaRef};
 use datafusion::common::ScalarValue;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::prelude::*;
+use futures::StreamExt;
 
 use crate::{ErrorHelper, Runtime};
 
@@ -38,66 +38,79 @@ pub fn row_to_scalar_values(
 }
 
 pub struct BindReader {
-    template: LogicalPlan,
     runtime: Arc<Runtime>,
     ctx: Arc<SessionContext>,
+    plan: LogicalPlan,
     bound: Box<dyn RecordBatchReader + Send>,
     current_batch: Option<RecordBatch>,
-    current_row: usize,
-    pending_results: IntoIter<RecordBatch>,
+    next_row: usize,
+    pending_results: Option<datafusion::execution::SendableRecordBatchStream>,
     schema: SchemaRef,
 }
 
 impl BindReader {
     pub fn new(
-        template: LogicalPlan,
         runtime: Arc<Runtime>,
         ctx: Arc<SessionContext>,
+        plan: LogicalPlan,
         bound: Box<dyn RecordBatchReader + Send>,
     ) -> Self {
-        let schema: SchemaRef = template.schema().as_arrow().clone().into();
+        let schema: SchemaRef = plan.schema().as_arrow().clone().into();
         Self {
-            template,
             runtime,
             ctx,
+            plan,
             bound,
             current_batch: None,
-            current_row: 0,
-            pending_results: Vec::new().into_iter(),
+            next_row: 0,
+            pending_results: None,
             schema,
         }
     }
 
     fn advance(&mut self) -> Option<Result<RecordBatch, ArrowError>> {
         loop {
-            if let Some(batch) = self.pending_results.next() {
-                return Some(Ok(batch));
+            if let Some(stream) = &mut self.pending_results {
+                let maybe_batch = self.runtime.block_on(async { stream.next().await });
+                match maybe_batch {
+                    Some(Ok(batch)) => return Some(Ok(batch)),
+                    Some(Err(e)) => return Some(Err(e.into())),
+                    None => {
+                        self.pending_results = None;
+                        continue;
+                    }
+                }
             }
+            self.pending_results = None;
 
-            let batch = match &self.current_batch {
-                Some(b) if self.current_row < b.num_rows() => b,
-                _ => match self.bound.next() {
+            let batch = loop {
+                if let Some(b) = &self.current_batch
+                    && self.next_row < b.num_rows()
+                {
+                    break b;
+                }
+
+                match self.bound.next() {
                     Some(Ok(b)) => {
                         self.current_batch = Some(b);
-                        self.current_row = 0;
-                        self.current_batch.as_ref().unwrap()
+                        self.next_row = 0;
                     }
                     Some(Err(e)) => return Some(Err(e)),
                     None => return None,
-                },
+                }
             };
 
-            let params = match row_to_scalar_values(batch, self.current_row) {
+            let params = match row_to_scalar_values(batch, self.next_row) {
                 Ok(p) => p,
                 Err(e) => {
                     return Some(Err(ArrowError::ExternalError(Box::new(e))));
                 }
             };
-            self.current_row += 1;
+            self.next_row += 1;
 
             let result = self.runtime.block_on(async {
                 let plan_with_params = self
-                    .template
+                    .plan
                     .clone()
                     .with_param_values(params)
                     .map_err(ErrorHelper::from_datafusion)?;
@@ -106,12 +119,14 @@ impl BindReader {
                     .execute_logical_plan(plan_with_params)
                     .await
                     .map_err(ErrorHelper::from_datafusion)?;
-                df.collect().await.map_err(ErrorHelper::from_datafusion)
+                df.execute_stream()
+                    .await
+                    .map_err(ErrorHelper::from_datafusion)
             });
 
             match result {
                 Ok(batches) => {
-                    self.pending_results = batches.into_iter();
+                    self.pending_results = Some(batches);
                 }
                 Err(e) => {
                     return Some(Err(ArrowError::ExternalError(Box::new(e.to_adbc()))));
