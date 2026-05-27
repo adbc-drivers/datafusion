@@ -93,10 +93,18 @@ fn test_connection_options() {
 
     assert_eq!(current_catalog, "datafusion");
 
-    let _ = connection.set_option(
-        OptionConnection::CurrentCatalog,
-        OptionValue::String("datafusion2".to_string()),
-    );
+    // Create the secondary catalog and schema before switching
+    let mut stmt = connection.new_statement().unwrap();
+    stmt.set_sql_query("CREATE DATABASE IF NOT EXISTS datafusion2")
+        .unwrap();
+    stmt.execute_update().unwrap();
+
+    connection
+        .set_option(
+            OptionConnection::CurrentCatalog,
+            OptionValue::String("datafusion2".to_string()),
+        )
+        .unwrap();
 
     let current_catalog = connection
         .get_option_string(OptionConnection::CurrentCatalog)
@@ -104,22 +112,54 @@ fn test_connection_options() {
 
     assert_eq!(current_catalog, "datafusion2");
 
+    // Switch back and create a secondary schema
+    connection
+        .set_option(
+            OptionConnection::CurrentCatalog,
+            OptionValue::String("datafusion".to_string()),
+        )
+        .unwrap();
+
+    let mut stmt = connection.new_statement().unwrap();
+    stmt.set_sql_query("CREATE SCHEMA IF NOT EXISTS public2")
+        .unwrap();
+    stmt.execute_update().unwrap();
+
     let current_schema = connection
         .get_option_string(OptionConnection::CurrentSchema)
         .unwrap();
 
     assert_eq!(current_schema, "public");
 
-    let _ = connection.set_option(
-        OptionConnection::CurrentSchema,
-        OptionValue::String("public2".to_string()),
-    );
+    connection
+        .set_option(
+            OptionConnection::CurrentSchema,
+            OptionValue::String("public2".to_string()),
+        )
+        .unwrap();
 
     let current_schema = connection
         .get_option_string(OptionConnection::CurrentSchema)
         .unwrap();
 
     assert_eq!(current_schema, "public2");
+
+    // Verify setting nonexistent catalog/schema returns an error
+    let err = connection
+        .set_option(
+            OptionConnection::CurrentCatalog,
+            OptionValue::String("nonexistent".to_string()),
+        )
+        .unwrap_err();
+    assert_eq!(err.status, adbc_core::error::Status::NotFound);
+
+    let err = connection
+        .set_option(
+            OptionConnection::CurrentSchema,
+            OptionValue::String("nonexistent".to_string()),
+        )
+        .unwrap_err();
+    assert_eq!(err.status, adbc_core::error::Status::NotFound);
 }
 
 #[test]
