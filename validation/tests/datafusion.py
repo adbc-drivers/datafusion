@@ -26,7 +26,8 @@ class DataFusionQuirks(model.DriverQuirks):
     vendor_version = "53.1.0"
     short_version = "53"
     features = model.DriverFeatures(
-        statement_bind=False,
+        statement_bind=True,
+        statement_get_parameter_schema=True,
         statement_prepare=True,
         current_catalog="datafusion",
         current_schema="public",
@@ -52,6 +53,9 @@ class DataFusionQuirks(model.DriverQuirks):
     @property
     def queries_paths(self) -> tuple[Path]:
         return (Path(__file__).parent.parent / "queries",)
+
+    def bind_parameter(self, index: int) -> str:
+        return f"${index}"
 
     def is_table_not_found(self, table_name: str, error: Exception) -> bool:
         msg = str(error)

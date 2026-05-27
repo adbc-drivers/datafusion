@@ -24,10 +24,6 @@ def pytest_generate_tests(metafunc) -> None:
 
 
 class TestStatement(statement_tests.TestStatement):
-    @pytest.mark.xfail(reason="bind parameters not implemented")
-    def test_parameter_execute(self, driver, conn) -> None:
-        super().test_parameter_execute(driver, conn)
-
     @pytest.mark.xfail(
         reason="DataFusion lightweight updates require special table settings"
     )
