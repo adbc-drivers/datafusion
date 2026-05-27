@@ -40,6 +40,7 @@ driverbase = { git = "https://github.com/adbc-drivers/driverbase-rs.git" }
 regex = "1"
 tokio = { version = "1.49", features = ["rt-multi-thread"] }
 prost = "0.14.3"
+futures = "0.3.32"
 
 [dev-dependencies]
 

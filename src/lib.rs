@@ -31,11 +31,11 @@ use datafusion::logical_expr::dml::InsertOp;
 use datafusion::prelude::*;
 use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
 use datafusion_substrait::substrait::proto::Plan;
+use futures::StreamExt;
 use prost::Message;
 use std::fmt::Debug;
 use std::future::Future;
 use std::sync::Arc;
-use std::vec::IntoIter;
 
 use arrow_array::{RecordBatch, RecordBatchReader};
 use arrow_schema::{ArrowError, SchemaRef};
@@ -189,20 +189,25 @@ impl RecordBatchReader for SingleBatchReader {
 }
 
 pub struct DataFusionReader {
-    batches: IntoIter<RecordBatch>,
+    runtime: Arc<Runtime>,
+    stream: datafusion::execution::SendableRecordBatchStream,
     schema: SchemaRef,
 }
 
 impl DataFusionReader {
-    pub async fn new(df: DataFrame) -> std::result::Result<Self, DriverError> {
+    pub async fn new(
+        runtime: Arc<Runtime>,
+        df: DataFrame,
+    ) -> std::result::Result<Self, DriverError> {
         let schema = df.schema().as_arrow().clone();
+        let stream = df
+            .execute_stream()
+            .await
+            .map_err(ErrorHelper::from_datafusion)?;
 
         Ok(Self {
-            batches: df
-                .collect()
-                .await
-                .map_err(ErrorHelper::from_datafusion)?
-                .into_iter(),
+            runtime,
+            stream,
             schema: schema.into(),
         })
     }
@@ -212,7 +217,8 @@ impl Iterator for DataFusionReader {
     type Item = std::result::Result<RecordBatch, ArrowError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.batches.next().map(Ok)
+        let maybe_batch = self.runtime.block_on(async { self.stream.next().await });
+        maybe_batch.map(|b| b.map_err(Into::into))
     }
 }
 
@@ -656,13 +662,14 @@ impl Optionable for DataFusionStatement {
 }
 
 impl DataFusionStatement {
-    fn get_prepared_plan(&mut self) -> adbc_core::error::Result<LogicalPlan> {
+    fn ensure_prepared(&mut self) -> adbc_core::error::Result<LogicalPlan> {
         self.prepare()?;
-        match &self.query {
-            Some(QueryState::Prepared(plan)) => Ok(plan.clone()),
-            _ => Err(ErrorHelper::invalid_state()
+        if let Some(QueryState::Prepared(plan)) = &self.query {
+            Ok(plan.clone())
+        } else {
+            Err(ErrorHelper::invalid_state()
                 .message("no query has been set")
-                .to_adbc()),
+                .to_adbc())
         }
     }
 
@@ -670,11 +677,11 @@ impl DataFusionStatement {
         &mut self,
         reader: Box<dyn RecordBatchReader + Send>,
     ) -> Result<Box<dyn RecordBatchReader + Send>> {
-        let template = self.get_prepared_plan()?;
+        let plan = self.ensure_prepared()?;
         Ok(Box::new(bind::BindReader::new(
-            template,
             self.runtime.clone(),
             self.ctx.clone(),
+            plan,
             reader,
         )))
     }
@@ -683,17 +690,14 @@ impl DataFusionStatement {
         &mut self,
         reader: Box<dyn RecordBatchReader + Send>,
     ) -> adbc_core::error::Result<Option<i64>> {
-        let template = self.get_prepared_plan()?;
-        let mut total_rows: i64 = 0;
-
+        let plan = self.ensure_prepared()?;
         self.runtime.block_on(async {
             for batch in reader {
                 let batch = batch.map_err(ErrorHelper::from_arrow)?;
-                total_rows = total_rows.saturating_add(batch.num_rows() as i64);
                 for row_idx in 0..batch.num_rows() {
                     let params = bind::row_to_scalar_values(&batch, row_idx)?;
 
-                    let plan_with_params = template
+                    let plan_with_params = plan
                         .clone()
                         .with_param_values(params)
                         .map_err(ErrorHelper::from_datafusion)?;
@@ -707,8 +711,7 @@ impl DataFusionStatement {
             }
             Ok::<_, adbc_core::error::Error>(())
         })?;
-
-        Ok(Some(total_rows))
+        Ok(None)
     }
 
     fn make_table_ref(&self) -> TableReference {
@@ -877,7 +880,10 @@ impl Statement for DataFusionStatement {
                 }
             };
 
-            Ok(Box::new(DataFusionReader::new(df).await?) as Box<dyn RecordBatchReader + Send>)
+            Ok(
+                Box::new(DataFusionReader::new(self.runtime.clone(), df).await?)
+                    as Box<dyn RecordBatchReader + Send>,
+            )
         })
     }
 
@@ -920,8 +926,7 @@ impl Statement for DataFusionStatement {
             df.collect().await.map_err(ErrorHelper::from_datafusion)?;
             Ok::<_, adbc_core::error::Error>(())
         })?;
-
-        Ok(Some(0))
+        Ok(None)
     }
 
     fn execute_schema(&mut self) -> adbc_core::error::Result<arrow_schema::Schema> {
@@ -956,29 +961,46 @@ impl Statement for DataFusionStatement {
     }
 
     fn get_parameter_schema(&self) -> adbc_core::error::Result<arrow_schema::Schema> {
-        let plan = match &self.query {
-            Some(QueryState::Prepared(plan)) => plan.clone(),
-            Some(QueryState::Sql(sql)) => self
-                .runtime
-                .block_on(async {
-                    self.ctx
-                        .state()
-                        .create_logical_plan(sql)
-                        .await
-                        .map_err(ErrorHelper::from_datafusion)
-                })
-                .map_err(|e| e.to_adbc())?,
+        let param_types = match &self.query {
+            Some(QueryState::Prepared(plan)) => plan
+                .get_parameter_types()
+                .map_err(ErrorHelper::from_datafusion)
+                .map_err(|e| e.to_adbc()),
+            Some(QueryState::Sql(sql)) => {
+                let plan = self
+                    .runtime
+                    .block_on(async {
+                        self.ctx
+                            .state()
+                            .create_logical_plan(sql)
+                            .await
+                            .map_err(ErrorHelper::from_datafusion)
+                    })
+                    .map_err(|e| e.to_adbc())?;
+                plan.get_parameter_types()
+                    .map_err(ErrorHelper::from_datafusion)
+                    .map_err(|e| e.to_adbc())
+            }
+            Some(QueryState::Substrait(plan)) => {
+                let logical_plan = self
+                    .runtime
+                    .block_on(async {
+                        from_substrait_plan(&self.ctx.state(), plan)
+                            .await
+                            .map_err(ErrorHelper::from_datafusion)
+                    })
+                    .map_err(|e| e.to_adbc())?;
+                logical_plan
+                    .get_parameter_types()
+                    .map_err(ErrorHelper::from_datafusion)
+                    .map_err(|e| e.to_adbc())
+            }
             _ => {
                 return Err(ErrorHelper::invalid_state()
                     .message("no query has been set")
                     .to_adbc());
             }
-        };
-
-        let param_types = plan
-            .get_parameter_types()
-            .map_err(ErrorHelper::from_datafusion)
-            .map_err(|e| e.to_adbc())?;
+        }?;
 
         let mut params: Vec<_> = param_types.into_iter().collect();
         params.sort_by_key(|(name, _)| name.trim_start_matches('$').parse::<usize>().unwrap_or(0));
@@ -986,7 +1008,7 @@ impl Statement for DataFusionStatement {
         let fields: Vec<arrow_schema::Field> = params
             .into_iter()
             .map(|(name, dt)| {
-                let data_type = dt.unwrap_or(arrow_schema::DataType::Utf8);
+                let data_type = dt.unwrap_or(arrow_schema::DataType::Null);
                 arrow_schema::Field::new(name, data_type, true)
             })
             .collect();
