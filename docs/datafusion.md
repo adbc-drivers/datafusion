@@ -56,6 +56,28 @@ Note: The example above is for Python using the [adbc-driver-manager](https://py
 
 ## Feature & Type Support
 
+The DataFusion driver supports many of the extensions to the SQL dialect that the [DataFusion CLI](https://datafusion.apache.org/user-guide/cli/) implements, including `SHOW ALL`, `SHOW`, `SET <OPTION> TO <VALUE>`, `CREATE EXTERNAL TABLE`, and scanning local and remote files/directories, including over HTTP and on S3.
+
+For example:
+
+```sql
+SELECT `Breed Name`, `Lifespan`
+  FROM 'https://hyperparam-public.s3.amazonaws.com/bunnies.parquet'
+  ORDER BY `Lifespan` DESC
+  LIMIT 5;
+
+-- Result:
+-- ┌──────────────────┬──────────┐
+-- │ Breed Name       │ Lifespan │
+-- ├──────────────────┼──────────┤
+-- │ French Angora    │ 12       │
+-- │ English Angora   │ 10       │
+-- │ Netherland Dwarf │ 10       │
+-- │ Mini Lop         │ 9        │
+-- │ Lionhead         │ 9        │
+-- └──────────────────┴──────────┘
+```
+
 {{ features|safe }}
 
 ### Types
