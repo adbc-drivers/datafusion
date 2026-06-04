@@ -68,4 +68,10 @@ Note: The example above is for Python using the [adbc-driver-manager](https://py
 
 {{ compatibility_info|safe }}
 
+## Previous Versions
+
+To see documentation for previous versions of this driver, see the following:
+
+- [v0.24.1](./v0.24.1.md)
+
 [datafusion]: https://datafusion.apache.org/
