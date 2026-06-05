@@ -23,7 +23,7 @@ platforms = ["linux-64", "osx-arm64", "win-64", "linux-aarch64"]
 version = "0.1.0"
 
 [tasks]
-make = "adbc-make run build DRIVER=datafusion VERBOSE=true IMPL_LANG=rust"
+make = "adbc-make run build DRIVER=datafusion VERBOSE=true IMPL_LANG=rust DEBUG=true"
 test = "cargo test"
 release = "adbc-release"
 validate = "pytest -vvs --junit-xml=validation-report.xml -rfEsxX validation/tests/"

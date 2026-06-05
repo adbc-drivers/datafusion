@@ -21,7 +21,9 @@
 // under the License.
 
 mod bind;
+mod catalog;
 mod get_objects;
+mod object_storage;
 use adbc_core::constants;
 use datafusion::common::TableReference;
 use datafusion::dataframe::DataFrameWriteOptions;
@@ -131,6 +133,38 @@ impl ErrorHelper {
             }
         }
     }
+}
+
+async fn register_object_store_for_plan(
+    ctx: &SessionContext,
+    plan: &LogicalPlan,
+) -> std::result::Result<(), datafusion::error::DataFusionError> {
+    use datafusion::datasource::listing::ListingTableUrl;
+    use datafusion::logical_expr::DdlStatement;
+
+    let location = match plan {
+        LogicalPlan::Ddl(DdlStatement::CreateExternalTable(cmd)) => &cmd.location,
+        LogicalPlan::Copy(copy_to) => &copy_to.output_url,
+        _ => return Ok(()),
+    };
+
+    let table_url = ListingTableUrl::parse(location)?;
+    let scheme = table_url.scheme();
+    let url = table_url.as_ref();
+
+    if ctx
+        .runtime_env()
+        .object_store_registry
+        .get_store(url)
+        .is_err()
+    {
+        let state = ctx.state();
+        let table_options = state.default_table_options();
+        let store =
+            object_storage::get_object_store(&state, scheme, url, &table_options, false).await?;
+        ctx.runtime_env().register_object_store(url, store);
+    }
+    Ok(())
 }
 
 pub enum Runtime {
@@ -244,7 +278,11 @@ impl Driver for DataFusionDriver {
 
     fn new_database(&mut self) -> Result<Self::DatabaseType> {
         let config = SessionConfig::new().with_information_schema(true);
-        let ctx = SessionContext::new_with_config(config);
+        let ctx = SessionContext::new_with_config(config).enable_url_table();
+        ctx.register_catalog_list(Arc::new(catalog::DynamicObjectStoreCatalog::new(
+            ctx.state().catalog_list().clone(),
+            ctx.state_weak_ref(),
+        )));
         Ok(Self::DatabaseType {
             handle: self.handle.clone(),
             ctx: Arc::new(ctx),
@@ -261,7 +299,11 @@ impl Driver for DataFusionDriver {
         >,
     ) -> adbc_core::error::Result<Self::DatabaseType> {
         let config = SessionConfig::new().with_information_schema(true);
-        let ctx = SessionContext::new_with_config(config);
+        let ctx = SessionContext::new_with_config(config).enable_url_table();
+        ctx.register_catalog_list(Arc::new(catalog::DynamicObjectStoreCatalog::new(
+            ctx.state().catalog_list().clone(),
+            ctx.state_weak_ref(),
+        )));
         let mut database = Self::DatabaseType {
             handle: self.handle.clone(),
             ctx: Arc::new(ctx),
@@ -615,6 +657,28 @@ enum QueryState {
     Prepared(LogicalPlan),
 }
 
+impl QueryState {
+    async fn execute(&self, ctx: &SessionContext) -> std::result::Result<DataFrame, DriverError> {
+        let plan = match self {
+            QueryState::Sql(query) => ctx
+                .state()
+                .create_logical_plan(query)
+                .await
+                .map_err(ErrorHelper::from_datafusion)?,
+            QueryState::Substrait(plan) => from_substrait_plan(&ctx.state(), plan)
+                .await
+                .map_err(ErrorHelper::from_datafusion)?,
+            QueryState::Prepared(plan) => plan.clone(),
+        };
+        register_object_store_for_plan(ctx, &plan)
+            .await
+            .map_err(ErrorHelper::from_datafusion)?;
+        ctx.execute_logical_plan(plan)
+            .await
+            .map_err(ErrorHelper::from_datafusion)
+    }
+}
+
 pub struct DataFusionStatement {
     runtime: Arc<Runtime>,
     ctx: Arc<SessionContext>,
@@ -867,25 +931,7 @@ impl Statement for DataFusionStatement {
 
         self.runtime.block_on(async {
             let df = match &self.query {
-                Some(QueryState::Sql(query)) => self
-                    .ctx
-                    .sql(query)
-                    .await
-                    .map_err(ErrorHelper::from_datafusion)?,
-                Some(QueryState::Substrait(plan)) => {
-                    let plan = from_substrait_plan(&self.ctx.state(), plan)
-                        .await
-                        .map_err(ErrorHelper::from_datafusion)?;
-                    self.ctx
-                        .execute_logical_plan(plan)
-                        .await
-                        .map_err(ErrorHelper::from_datafusion)?
-                }
-                Some(QueryState::Prepared(plan)) => self
-                    .ctx
-                    .execute_logical_plan(plan.clone())
-                    .await
-                    .map_err(ErrorHelper::from_datafusion)?,
+                Some(q) => q.execute(&self.ctx).await?,
                 None => {
                     return Err(ErrorHelper::invalid_state()
                         .message("no query or Substrait plan has been set")
@@ -911,25 +957,7 @@ impl Statement for DataFusionStatement {
 
         self.runtime.block_on(async {
             let df = match &self.query {
-                Some(QueryState::Sql(query)) => self
-                    .ctx
-                    .sql(query)
-                    .await
-                    .map_err(ErrorHelper::from_datafusion)?,
-                Some(QueryState::Substrait(plan)) => {
-                    let plan = from_substrait_plan(&self.ctx.state(), plan)
-                        .await
-                        .map_err(ErrorHelper::from_datafusion)?;
-                    self.ctx
-                        .execute_logical_plan(plan)
-                        .await
-                        .map_err(ErrorHelper::from_datafusion)?
-                }
-                Some(QueryState::Prepared(plan)) => self
-                    .ctx
-                    .execute_logical_plan(plan.clone())
-                    .await
-                    .map_err(ErrorHelper::from_datafusion)?,
+                Some(q) => q.execute(&self.ctx).await?,
                 None => {
                     return Err(ErrorHelper::invalid_state()
                         .message("no query or Substrait plan has been set")
