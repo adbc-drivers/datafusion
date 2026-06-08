@@ -21,12 +21,16 @@
 // under the License.
 
 use adbc_core::{Connection, Database, Driver, Optionable, Statement};
-use adbc_driver_datafusion::{DataFusionConnection, DataFusionDriver};
-use arrow_array::RecordBatch;
+use adbc_driver_datafusion::{ContextInit, DataFusionConnection, DataFusionDriver, DatabaseOpts};
+use arrow_array::{ArrayRef, Int32Array, RecordBatch};
 use datafusion::prelude::*;
+use std::error::Error as StdError;
+use std::sync::Arc;
 
-use adbc_core::options::{OptionConnection, OptionStatement, OptionValue};
+use adbc_core::options::{OptionConnection, OptionDatabase, OptionStatement, OptionValue};
+use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use arrow_select::concat::concat_batches;
+use datafusion::datasource::MemTable;
 use datafusion_substrait::logical_plan::producer::to_substrait_plan;
 use datafusion_substrait::substrait::proto::Plan;
 use prost::Message;
@@ -71,6 +75,44 @@ fn execute_sql_query(connection: &mut DataFusionConnection, query: &str) -> Reco
     concat_batches(&schema, &batches).unwrap()
 }
 
+fn try_execute_sql_query(
+    connection: &mut DataFusionConnection,
+    query: &str,
+) -> Result<RecordBatch, Box<dyn StdError>> {
+    let mut statement = connection.new_statement()?;
+    statement.set_sql_query(query)?;
+
+    let reader = statement.execute()?;
+    let mut batches = Vec::new();
+    for batch in reader {
+        batches.push(batch?);
+    }
+
+    let schema = match batches.first() {
+        Some(batch) => batch.schema(),
+        None => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "query returned no batches",
+            )
+            .into());
+        }
+    };
+
+    Ok(concat_batches(&schema, &batches)?)
+}
+
+fn answer_table(value: i32) -> datafusion::error::Result<MemTable> {
+    let schema: SchemaRef = Arc::new(Schema::new(vec![Field::new(
+        "answer",
+        DataType::Int32,
+        false,
+    )]));
+    let values: ArrayRef = Arc::new(Int32Array::from(vec![value]));
+    let batch = RecordBatch::try_new(schema.clone(), vec![values])?;
+    MemTable::try_new(schema, vec![vec![batch]])
+}
+
 fn execute_substrait(connection: &mut DataFusionConnection, plan: Plan) -> RecordBatch {
     let mut statement = connection.new_statement().unwrap();
 
@@ -81,6 +123,115 @@ fn execute_substrait(connection: &mut DataFusionConnection, plan: Plan) -> Recor
     let schema = batches.first().unwrap().schema();
 
     concat_batches(&schema, &batches).unwrap()
+}
+
+#[test]
+fn test_context_init_registers_table_provider() -> Result<(), Box<dyn StdError>> {
+    let init: ContextInit = Arc::new(|ctx, _opts| {
+        let table = answer_table(42)?;
+        ctx.register_table("injected", Arc::new(table))?;
+        Ok(())
+    });
+    let mut driver = DataFusionDriver::new_with_context_init(None, init);
+    let database = driver.new_database()?;
+    let mut connection = database.new_connection()?;
+
+    let batch = try_execute_sql_query(&mut connection, "SELECT answer FROM injected")?;
+
+    assert_eq!(batch.num_rows(), 1);
+    assert_eq!(batch.num_columns(), 1);
+    Ok(())
+}
+
+#[test]
+fn test_context_init_receives_and_consumes_database_options() -> Result<(), Box<dyn StdError>> {
+    let init: ContextInit = Arc::new(|ctx, opts: &mut DatabaseOpts| {
+        let table_name = match opts.remove(&OptionDatabase::Other("custom.table_name".to_string()))
+        {
+            Some(OptionValue::String(table_name)) => table_name,
+            Some(_) => {
+                return Err(datafusion::error::DataFusionError::Configuration(
+                    "custom.table_name must be a string".to_string(),
+                ));
+            }
+            None => {
+                return Err(datafusion::error::DataFusionError::Configuration(
+                    "custom.table_name is required".to_string(),
+                ));
+            }
+        };
+
+        let table = answer_table(7)?;
+        ctx.register_table(table_name, Arc::new(table))?;
+        Ok(())
+    });
+    let mut driver = DataFusionDriver::new_with_context_init(None, init);
+    let database = driver.new_database_with_opts(vec![
+        (
+            OptionDatabase::Uri,
+            OptionValue::String("datafusion://".to_string()),
+        ),
+        (
+            OptionDatabase::Other("custom.table_name".to_string()),
+            OptionValue::String("custom_injected".to_string()),
+        ),
+    ])?;
+    let mut connection = database.new_connection()?;
+
+    let batch = try_execute_sql_query(&mut connection, "SELECT answer FROM custom_injected")?;
+
+    assert_eq!(batch.num_rows(), 1);
+    assert_eq!(batch.num_columns(), 1);
+    Ok(())
+}
+
+#[test]
+fn test_unconsumed_unknown_database_option_still_errors() -> Result<(), Box<dyn StdError>> {
+    let mut driver = DataFusionDriver::new(None);
+    let result = driver.new_database_with_opts(vec![(
+        OptionDatabase::Other("custom.unconsumed".to_string()),
+        OptionValue::String("value".to_string()),
+    )]);
+
+    let err = match result {
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "expected unconsumed database option to fail",
+            )
+            .into());
+        }
+        Err(err) => err,
+    };
+
+    assert_eq!(err.status, adbc_core::error::Status::NotImplemented);
+    Ok(())
+}
+
+#[test]
+fn test_context_init_failure_maps_to_adbc_error() -> Result<(), Box<dyn StdError>> {
+    let init: ContextInit = Arc::new(|_ctx, _opts| {
+        Err(datafusion::error::DataFusionError::Configuration(
+            "hook failed".to_string(),
+        ))
+    });
+    let mut driver = DataFusionDriver::new_with_context_init(None, init);
+    let result = driver.new_database();
+
+    let err = match result {
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "expected context init failure to fail database creation",
+            )
+            .into());
+        }
+        Err(err) => err,
+    };
+
+    assert_eq!(err.status, adbc_core::error::Status::InvalidArguments);
+    assert!(err.message.contains("hook failed"));
+    Ok(())
 }
 
 #[test]
