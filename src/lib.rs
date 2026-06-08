@@ -35,6 +35,7 @@ use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
 use datafusion_substrait::substrait::proto::Plan;
 use futures::StreamExt;
 use prost::Message;
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::future::Future;
 use std::sync::Arc;
@@ -61,6 +62,18 @@ impl driverbase::error::ErrorHelper for ErrorHelper {
 }
 
 type DriverError = driverbase::error::Error<ErrorHelper>;
+
+/// Database option values supplied during database initialization.
+pub type DatabaseOpts = HashMap<OptionDatabase, OptionValue>;
+
+/// Hook invoked after the `SessionContext` is constructed.
+///
+/// Downstream drivers can use this to register custom catalogs, schemas,
+/// functions, or table providers. The hook may remove custom database options
+/// that it consumes; any options left behind are handled by the base driver.
+pub type ContextInit = Arc<
+    dyn Fn(&mut SessionContext, &mut DatabaseOpts) -> datafusion::error::Result<()> + Send + Sync,
+>;
 
 impl ErrorHelper {
     fn from_datafusion(err: datafusion::error::DataFusionError) -> DriverError {
@@ -262,14 +275,52 @@ impl RecordBatchReader for DataFusionReader {
     }
 }
 
-#[derive(Default)]
 pub struct DataFusionDriver {
     handle: Option<tokio::runtime::Handle>,
+    context_init: ContextInit,
 }
 
 impl DataFusionDriver {
     pub fn new(handle: Option<tokio::runtime::Handle>) -> Self {
-        Self { handle }
+        Self::new_with_context_init(handle, Arc::new(|_, _| Ok(())))
+    }
+
+    /// Create a driver that customizes each database's `SessionContext`.
+    pub fn new_with_context_init(
+        handle: Option<tokio::runtime::Handle>,
+        context_init: ContextInit,
+    ) -> Self {
+        Self {
+            handle,
+            context_init,
+        }
+    }
+
+    fn new_database_with_database_opts(
+        &self,
+        database_opts: &mut DatabaseOpts,
+    ) -> Result<DataFusionDatabase> {
+        let config = SessionConfig::new().with_information_schema(true);
+        let mut ctx = SessionContext::new_with_config(config).enable_url_table();
+        ctx.register_catalog_list(Arc::new(catalog::DynamicObjectStoreCatalog::new(
+            ctx.state().catalog_list().clone(),
+            ctx.state_weak_ref(),
+        )));
+        (self.context_init)(&mut ctx, database_opts).map_err(|error| {
+            ErrorHelper::from_datafusion(error)
+                .context("initialize DataFusion session context")
+                .to_adbc()
+        })?;
+        Ok(DataFusionDatabase {
+            handle: self.handle.clone(),
+            ctx: Arc::new(ctx),
+        })
+    }
+}
+
+impl Default for DataFusionDriver {
+    fn default() -> Self {
+        Self::new(None)
     }
 }
 
@@ -277,16 +328,8 @@ impl Driver for DataFusionDriver {
     type DatabaseType = DataFusionDatabase;
 
     fn new_database(&mut self) -> Result<Self::DatabaseType> {
-        let config = SessionConfig::new().with_information_schema(true);
-        let ctx = SessionContext::new_with_config(config).enable_url_table();
-        ctx.register_catalog_list(Arc::new(catalog::DynamicObjectStoreCatalog::new(
-            ctx.state().catalog_list().clone(),
-            ctx.state_weak_ref(),
-        )));
-        Ok(Self::DatabaseType {
-            handle: self.handle.clone(),
-            ctx: Arc::new(ctx),
-        })
+        let mut database_opts = DatabaseOpts::default();
+        self.new_database_with_database_opts(&mut database_opts)
     }
 
     fn new_database_with_opts(
@@ -298,17 +341,9 @@ impl Driver for DataFusionDriver {
             ),
         >,
     ) -> adbc_core::error::Result<Self::DatabaseType> {
-        let config = SessionConfig::new().with_information_schema(true);
-        let ctx = SessionContext::new_with_config(config).enable_url_table();
-        ctx.register_catalog_list(Arc::new(catalog::DynamicObjectStoreCatalog::new(
-            ctx.state().catalog_list().clone(),
-            ctx.state_weak_ref(),
-        )));
-        let mut database = Self::DatabaseType {
-            handle: self.handle.clone(),
-            ctx: Arc::new(ctx),
-        };
-        for (key, value) in opts {
+        let mut database_opts = opts.into_iter().collect::<DatabaseOpts>();
+        let mut database = self.new_database_with_database_opts(&mut database_opts)?;
+        for (key, value) in database_opts {
             database.set_option(key, value)?;
         }
         Ok(database)
@@ -1111,4 +1146,5 @@ impl Statement for DataFusionStatement {
     }
 }
 
+#[cfg(feature = "ffi")]
 adbc_ffi::export_driver!(AdbcDriverDatafusionInit, DataFusionDriver);
