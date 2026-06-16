@@ -422,3 +422,109 @@ async fn test_running_in_async() {
     assert_eq!(batch.num_rows(), 3);
     assert_eq!(batch.num_columns(), 2);
 }
+
+/// A single-partition keyed table; a `GROUP BY k` over it hash-repartitions to
+/// `target_partitions`, giving a plan whose output partition count is driven by config.
+fn keyed_table(n_keys: i32) -> datafusion::error::Result<MemTable> {
+    let schema: SchemaRef = Arc::new(Schema::new(vec![
+        Field::new("k", DataType::Int32, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let keys: ArrayRef = Arc::new(Int32Array::from((0..n_keys).collect::<Vec<_>>()));
+    let vals: ArrayRef = Arc::new(Int32Array::from(
+        (0..n_keys).map(|i| i * 10).collect::<Vec<_>>(),
+    ));
+    let batch = RecordBatch::try_new(schema.clone(), vec![keys, vals])?;
+    MemTable::try_new(schema, vec![vec![batch]])
+}
+
+/// A connection whose session pins `target_partitions` to `n` and has table `t` registered.
+fn connection_with_target_partitions(n: usize) -> DataFusionConnection {
+    let init: ContextInit = Arc::new(move |ctx, _opts| {
+        let config = SessionConfig::new()
+            .with_information_schema(true)
+            .with_target_partitions(n);
+        *ctx = SessionContext::new_with_config(config);
+        ctx.register_table("t", Arc::new(keyed_table(8)?))?;
+        Ok(())
+    });
+    let mut driver = DataFusionDriver::new_with_context_init(None, init);
+    let database = driver.new_database().unwrap();
+    database.new_connection().unwrap()
+}
+
+const GROUP_BY_QUERY: &str = "SELECT k, sum(v) AS s FROM t GROUP BY k";
+
+/// Collect the `k` column of every row produced by reading the given descriptor.
+fn read_partition_keys(connection: &DataFusionConnection, descriptor: &[u8]) -> Vec<i32> {
+    let reader = connection.read_partition(descriptor).unwrap();
+    let mut keys = Vec::new();
+    for batch in reader {
+        let batch = batch.unwrap();
+        let col = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        for i in 0..col.len() {
+            keys.push(col.value(i));
+        }
+    }
+    keys
+}
+
+#[test]
+fn test_execute_partitions_returns_one_descriptor_per_output_partition() {
+    let mut connection = connection_with_target_partitions(4);
+    let mut statement = connection.new_statement().unwrap();
+    statement.set_sql_query(GROUP_BY_QUERY).unwrap();
+
+    let result = statement.execute_partitions().unwrap();
+
+    // Hash-repartitioned aggregate => one ADBC partition per target partition.
+    assert!(
+        result.partitions.len() > 1,
+        "expected N > 1 partitions, got {}",
+        result.partitions.len()
+    );
+    assert_eq!(result.rows_affected, -1);
+
+    // The union of all partitions reproduces every key exactly once.
+    let mut keys = Vec::new();
+    for descriptor in &result.partitions {
+        keys.extend(read_partition_keys(&connection, descriptor));
+    }
+    keys.sort();
+    assert_eq!(keys, (0..8).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_read_partition_pins_target_partitions() {
+    // Plan with target_partitions = 4.
+    let mut planner = connection_with_target_partitions(4);
+    let mut statement = planner.new_statement().unwrap();
+    statement.set_sql_query(GROUP_BY_QUERY).unwrap();
+    let result = statement.execute_partitions().unwrap();
+    assert!(result.partitions.len() > 1);
+
+    // Execute on a connection whose default target_partitions differs (1). Pinning the
+    // descriptor's value is what keeps partition `i` meaningful and in range here.
+    let executor = connection_with_target_partitions(1);
+    let mut keys = Vec::new();
+    for descriptor in &result.partitions {
+        keys.extend(read_partition_keys(&executor, descriptor));
+    }
+    keys.sort();
+    assert_eq!(keys, (0..8).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_execute_partitions_prepared_not_implemented() {
+    let mut connection = connection_with_target_partitions(4);
+    let mut statement = connection.new_statement().unwrap();
+    statement.set_sql_query(GROUP_BY_QUERY).unwrap();
+    statement.prepare().unwrap();
+
+    let err = statement.execute_partitions().unwrap_err();
+    assert_eq!(err.status, adbc_core::error::Status::NotImplemented);
+}

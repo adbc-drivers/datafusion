@@ -30,6 +30,7 @@ use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::datasource::MemTable;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::logical_expr::dml::InsertOp;
+use datafusion::physical_plan::ExecutionPlanProperties;
 use datafusion::prelude::*;
 use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
 use datafusion_substrait::substrait::proto::Plan;
@@ -257,6 +258,21 @@ impl DataFusionReader {
             stream,
             schema: schema.into(),
         })
+    }
+
+    /// Construct a reader directly from a single-partition stream, bypassing the
+    /// `DataFrame` path. Used by `read_partition`, which executes one partition of an
+    /// already-built physical plan.
+    pub fn from_stream(
+        runtime: Arc<Runtime>,
+        stream: datafusion::execution::SendableRecordBatchStream,
+        schema: SchemaRef,
+    ) -> Self {
+        Self {
+            runtime,
+            stream,
+            schema,
+        }
     }
 }
 
@@ -678,11 +694,59 @@ impl Connection for DataFusionConnection {
 
     fn read_partition(
         &self,
-        _partition: impl AsRef<[u8]>,
+        partition: impl AsRef<[u8]>,
     ) -> Result<Box<dyn RecordBatchReader + Send>> {
-        Err(ErrorHelper::not_implemented()
-            .message("read_partition")
-            .to_adbc())
+        let (target_partitions, index, query) = decode_descriptor(partition.as_ref())?;
+        self.runtime.block_on(async {
+            // Pin target_partitions so the physical plan matches the one execute_partitions
+            // counted; DataFusion planning is deterministic only when this is held fixed.
+            let state =
+                datafusion::execution::session_state::SessionStateBuilder::new_from_existing(
+                    self.ctx.state(),
+                )
+                .with_config(
+                    self.ctx
+                        .copied_config()
+                        .with_target_partitions(target_partitions)
+                        // The carried-over catalog list already holds the registered providers;
+                        // recreating the default catalog here would wipe them.
+                        .with_create_default_catalog_and_schema(false),
+                )
+                .build();
+
+            let plan = match query {
+                DescQuery::Substrait(bytes) => {
+                    let proto = Plan::decode(bytes.as_slice()).map_err(|e| {
+                        ErrorHelper::invalid_argument()
+                            .message(e.to_string())
+                            .to_adbc()
+                    })?;
+                    from_substrait_plan(&state, &proto)
+                        .await
+                        .map_err(ErrorHelper::from_datafusion)?
+                }
+                DescQuery::Sql(sql) => state
+                    .create_logical_plan(&sql)
+                    .await
+                    .map_err(ErrorHelper::from_datafusion)?,
+            };
+            register_object_store_for_plan(&self.ctx, &plan)
+                .await
+                .map_err(ErrorHelper::from_datafusion)?;
+            let schema = plan.schema().as_arrow().clone();
+            let physical = state
+                .create_physical_plan(&plan)
+                .await
+                .map_err(ErrorHelper::from_datafusion)?;
+            let stream = physical
+                .execute(index as usize, state.task_ctx())
+                .map_err(ErrorHelper::from_datafusion)?;
+            Ok(Box::new(DataFusionReader::from_stream(
+                self.runtime.clone(),
+                stream,
+                schema.into(),
+            )) as Box<dyn RecordBatchReader + Send>)
+        })
     }
 }
 
@@ -712,6 +776,65 @@ impl QueryState {
             .await
             .map_err(ErrorHelper::from_datafusion)
     }
+}
+
+/// A query reconstructed from a partition descriptor. `Prepared` plans are not
+/// representable here: they have no portable serialization without `datafusion-proto`.
+enum DescQuery {
+    Substrait(Vec<u8>),
+    Sql(String),
+}
+
+/// Serialize a query for embedding in a partition descriptor. Returns the kind byte
+/// (0 = Substrait, 1 = SQL) and the query bytes. `Prepared` statements are rejected
+/// with `NOT_IMPLEMENTED` so clients fall back to single-partition execution.
+fn encode_query(query: &QueryState) -> adbc_core::error::Result<(u8, Vec<u8>)> {
+    match query {
+        QueryState::Substrait(plan) => Ok((0, plan.encode_to_vec())),
+        QueryState::Sql(sql) => Ok((1, sql.clone().into_bytes())),
+        QueryState::Prepared(_) => Err(ErrorHelper::not_implemented()
+            .message("partitioned execution of prepared statements")
+            .to_adbc()),
+    }
+}
+
+/// Build a self-contained partition descriptor:
+/// `[u32 LE target_partitions][u32 LE index][u8 kind][query bytes...]`.
+///
+/// `target_partitions` is encoded so `read_partition` can pin it and re-plan into the
+/// identical physical partitioning — see the determinism note on `read_partition`.
+fn encode_descriptor(target_partitions: u32, index: u32, kind: u8, query: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(9 + query.len());
+    out.extend_from_slice(&target_partitions.to_le_bytes());
+    out.extend_from_slice(&index.to_le_bytes());
+    out.push(kind);
+    out.extend_from_slice(query);
+    out
+}
+
+/// Inverse of [`encode_descriptor`]. Returns `(target_partitions, index, query)`.
+fn decode_descriptor(bytes: &[u8]) -> adbc_core::error::Result<(usize, u32, DescQuery)> {
+    if bytes.len() < 9 {
+        return Err(ErrorHelper::invalid_argument()
+            .message("short partition descriptor")
+            .to_adbc());
+    }
+    let target_partitions = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    let index = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+    let query = match bytes[8] {
+        0 => DescQuery::Substrait(bytes[9..].to_vec()),
+        1 => DescQuery::Sql(String::from_utf8(bytes[9..].to_vec()).map_err(|e| {
+            ErrorHelper::invalid_argument()
+                .message(e.to_string())
+                .to_adbc()
+        })?),
+        other => {
+            return Err(ErrorHelper::invalid_argument()
+                .format(format_args!("unknown descriptor kind {other}"))
+                .to_adbc());
+        }
+    };
+    Ok((target_partitions, index, query))
 }
 
 pub struct DataFusionStatement {
@@ -1031,9 +1154,33 @@ impl Statement for DataFusionStatement {
     }
 
     fn execute_partitions(&mut self) -> adbc_core::error::Result<adbc_core::PartitionedResult> {
-        Err(ErrorHelper::not_implemented()
-            .message("execute_partitions")
-            .to_adbc())
+        let query = self.query.as_ref().ok_or_else(|| {
+            ErrorHelper::invalid_state()
+                .message("no query or Substrait plan has been set")
+                .to_adbc()
+        })?;
+        self.runtime.block_on(async {
+            // Plan logically (registers object store) and build the physical plan so we
+            // can count its natural output partitions.
+            let df = query.execute(&self.ctx).await?;
+            let schema = df.schema().as_arrow().clone();
+            let physical = df
+                .create_physical_plan()
+                .await
+                .map_err(ErrorHelper::from_datafusion)?;
+            let n = physical.output_partitioning().partition_count() as u32;
+            // Capture target_partitions so read_partition re-plans identically.
+            let target_partitions = self.ctx.copied_config().target_partitions() as u32;
+            let (kind, query_bytes) = encode_query(query)?;
+            let partitions = (0..n)
+                .map(|i| encode_descriptor(target_partitions, i, kind, &query_bytes))
+                .collect::<Vec<_>>();
+            Ok(adbc_core::PartitionedResult {
+                partitions,
+                schema,
+                rows_affected: -1,
+            })
+        })
     }
 
     fn get_parameter_schema(&self) -> adbc_core::error::Result<arrow_schema::Schema> {
@@ -1148,3 +1295,53 @@ impl Statement for DataFusionStatement {
 
 #[cfg(feature = "ffi")]
 adbc_ffi::export_driver!(AdbcDriverDatafusionInit, DataFusionDriver);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn descriptor_round_trip_sql() {
+        let bytes = encode_descriptor(8, 3, 1, b"SELECT 1");
+        let (target_partitions, index, query) = decode_descriptor(&bytes).unwrap();
+        assert_eq!(target_partitions, 8);
+        assert_eq!(index, 3);
+        match query {
+            DescQuery::Sql(sql) => assert_eq!(sql, "SELECT 1"),
+            _ => panic!("expected SQL"),
+        }
+    }
+
+    #[test]
+    fn descriptor_round_trip_substrait() {
+        let plan_bytes = vec![1u8, 2, 3, 4, 5];
+        let bytes = encode_descriptor(4, 0, 0, &plan_bytes);
+        let (target_partitions, index, query) = decode_descriptor(&bytes).unwrap();
+        assert_eq!(target_partitions, 4);
+        assert_eq!(index, 0);
+        match query {
+            DescQuery::Substrait(b) => assert_eq!(b, plan_bytes),
+            _ => panic!("expected Substrait"),
+        }
+    }
+
+    #[test]
+    fn decode_rejects_short_descriptor() {
+        assert!(decode_descriptor(&[0u8; 8]).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_unknown_kind() {
+        let bytes = encode_descriptor(1, 0, 9, b"x");
+        assert!(decode_descriptor(&bytes).is_err());
+    }
+
+    #[test]
+    fn encode_query_rejects_prepared() {
+        let plan = LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(datafusion::common::DFSchema::empty()),
+        });
+        assert!(encode_query(&QueryState::Prepared(plan)).is_err());
+    }
+}
