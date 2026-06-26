@@ -481,10 +481,11 @@ fn test_execute_partitions_returns_one_descriptor_per_output_partition() {
 
     let result = statement.execute_partitions().unwrap();
 
-    // Hash-repartitioned aggregate => one ADBC partition per target partition.
-    assert!(
-        result.partitions.len() > 1,
-        "expected N > 1 partitions, got {}",
+    // Hash-repartitioned aggregate => one ADBC partition per target partition (4).
+    assert_eq!(
+        result.partitions.len(),
+        4,
+        "expected one descriptor per target partition, got {}",
         result.partitions.len()
     );
     assert_eq!(result.rows_affected, -1);
