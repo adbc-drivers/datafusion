@@ -499,7 +499,7 @@ fn test_execute_partitions_returns_one_descriptor_per_output_partition() {
 }
 
 #[test]
-fn test_read_partition_pins_target_partitions() {
+fn test_read_partition_executes_serialized_plan() {
     // Plan with target_partitions = 4.
     let mut planner = connection_with_target_partitions(4);
     let mut statement = planner.new_statement().unwrap();
@@ -507,8 +507,9 @@ fn test_read_partition_pins_target_partitions() {
     let result = statement.execute_partitions().unwrap();
     assert!(result.partitions.len() > 1);
 
-    // Execute on a connection whose default target_partitions differs (1). Pinning the
-    // descriptor's value is what keeps partition `i` meaningful and in range here.
+    // Execute on a connection whose default target_partitions differs (1). The descriptor
+    // carries the already-built physical plan, so its partitioning is fixed regardless of the
+    // executor's config — partition `i` stays meaningful and in range.
     let executor = connection_with_target_partitions(1);
     let mut keys = Vec::new();
     for descriptor in &result.partitions {
@@ -519,12 +520,21 @@ fn test_read_partition_pins_target_partitions() {
 }
 
 #[test]
-fn test_execute_partitions_prepared_not_implemented() {
+fn test_execute_partitions_prepared() {
+    // The proto path serializes the built physical plan regardless of source, so a prepared
+    // statement partitions like any other query.
     let mut connection = connection_with_target_partitions(4);
     let mut statement = connection.new_statement().unwrap();
     statement.set_sql_query(GROUP_BY_QUERY).unwrap();
     statement.prepare().unwrap();
 
-    let err = statement.execute_partitions().unwrap_err();
-    assert_eq!(err.status, adbc_core::error::Status::NotImplemented);
+    let result = statement.execute_partitions().unwrap();
+    assert!(result.partitions.len() > 1);
+
+    let mut keys = Vec::new();
+    for descriptor in &result.partitions {
+        keys.extend(read_partition_keys(&connection, descriptor));
+    }
+    keys.sort();
+    assert_eq!(keys, (0..8).collect::<Vec<_>>());
 }
