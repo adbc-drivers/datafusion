@@ -272,7 +272,7 @@ impl DataFusionReader {
     }
 
     /// Construct a reader directly from a single-partition stream.
-    pub fn from_stream(
+    pub(crate) fn from_stream(
         runtime: Arc<Runtime>,
         stream: datafusion::execution::SendableRecordBatchStream,
         schema: SchemaRef,
