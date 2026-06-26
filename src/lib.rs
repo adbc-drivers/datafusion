@@ -819,8 +819,7 @@ impl QueryState {
 
 /// Current partition-descriptor format version. Descriptors are opaque and version-local:
 /// the same driver build both produces and consumes them, so older layouts are not decoded.
-/// The version byte lets the format evolve (e.g. a future descriptor-shrink layout) without
-/// silently misreading an old payload.
+/// The version byte lets the format evolve without silently misreading an old payload.
 const DESCRIPTOR_VERSION: u8 = 1;
 
 /// Fixed descriptor header length: `version(1) + index(4)`.
@@ -828,9 +827,8 @@ const DESCRIPTOR_HEADER_LEN: usize = 5;
 
 /// Size above which a serialized plan payload is logged as a warning. The full plan is
 /// copied into every one of the N partition descriptors, so a large plan is paid N times
-/// over until the descriptor-shrink work ships the plan once. Operator-only plans are a
-/// few KB and never trip this; the threshold mainly catches plans that inline data (e.g. a
-/// custom node embedding its rows) or very large queries.
+/// over. Operator-only plans are a few KB and never trip this; the threshold mainly catches
+/// plans that inline data (e.g. a custom node embedding its rows) or very large queries.
 const PROTO_DESCRIPTOR_WARN_BYTES: usize = 8 << 20; // 8 MiB
 
 /// Build a self-contained partition descriptor:
@@ -1210,8 +1208,7 @@ impl Statement for DataFusionStatement {
             )
             .map_err(ErrorHelper::from_datafusion)?;
             if plan_bytes.len() > PROTO_DESCRIPTOR_WARN_BYTES {
-                // Until the descriptor-shrink work lands, the full plan rides each of the N
-                // descriptors. Warn when that gets large.
+                // The full plan is copied into each of the N descriptors; warn when large.
                 log::warn!(
                     "partition descriptor carries a {}-byte plan across {n} partitions",
                     plan_bytes.len(),
