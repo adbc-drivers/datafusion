@@ -80,6 +80,10 @@ statement.set_option(
 )?;
 ```
 
+`single` produces the same one-partition result as calling `execute` directly — it just
+delivers it through the partition API. Prefer `execute` unless your caller is built around
+`execute_partitions`/`read_partition` and wants uniform handling.
+
 ### Custom nodes
 
 `datafusion-proto` serializes built-in nodes with no configuration. A provider that emits

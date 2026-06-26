@@ -884,7 +884,10 @@ enum PartitionMode {
     /// Collapse to a single coalesced partition when the plan shuffles, otherwise one
     /// descriptor per natural output partition.
     Auto,
-    /// Always collapse to a single coalesced partition.
+    /// Always collapse to a single coalesced partition. This yields the same one-partition
+    /// result as calling [`Statement::execute`] directly, just delivered through the
+    /// partition API; prefer `execute` unless the caller is built around
+    /// `execute_partitions`/`read_partition`.
     Single,
 }
 
