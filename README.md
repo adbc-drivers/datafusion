@@ -57,6 +57,29 @@ planner built, every reader agrees on the partition layout and the reader needs 
 plan bytes (plus any registered providers and codec) — not the original query text or the
 planner's session configuration.
 
+### Shuffling plans
+
+Partitioned execution shines when each output partition reads independent input — a
+partitioned scan, or filters/projections over one. When the plan **shuffles** (a hash
+repartition for a join or grouped aggregate, or a sort), producing one output partition
+requires reading *all* input, so executing partitions independently re-runs the whole
+pre-shuffle pipeline once per partition — usually slower than a single execution.
+
+The statement option `datafusion.partition_mode` controls this:
+
+| Value | Behavior |
+| --- | --- |
+| `multi` (default) | One descriptor per natural output partition; logs a warning if the plan shuffles. |
+| `auto` | Collapse to a single partition when the plan shuffles, otherwise natural partitions. |
+| `single` | Always collapse to a single partition. |
+
+```rust
+statement.set_option(
+    OptionStatement::Other("datafusion.partition_mode".into()),
+    OptionValue::String("auto".into()),
+)?;
+```
+
 ### Custom nodes
 
 `datafusion-proto` serializes built-in nodes with no configuration. A provider that emits

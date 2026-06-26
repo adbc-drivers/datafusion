@@ -30,6 +30,7 @@ use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::datasource::MemTable;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::logical_expr::dml::InsertOp;
+use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 use datafusion::prelude::*;
 use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
@@ -642,6 +643,7 @@ impl Connection for DataFusionConnection {
             runtime: self.runtime.clone(),
             ctx: self.ctx.clone(),
             codec: self.codec.clone(),
+            partition_mode: PartitionMode::default(),
             query: None,
             bound: None,
             ingest: BulkIngestState::new(),
@@ -862,10 +864,76 @@ fn decode_descriptor(bytes: &[u8]) -> adbc_core::error::Result<(u32, Vec<u8>)> {
     Ok((index, plan_bytes))
 }
 
+/// Statement option selecting the `execute_partitions` strategy. String value, one of
+/// `auto`, `single`, or `multi` (see [`PartitionMode`]).
+const OPTION_PARTITION_MODE: &str = "datafusion.partition_mode";
+
+/// How `execute_partitions` splits a query into descriptors.
+///
+/// Producing one output partition of a plan that *shuffles* (a hash repartition for joins
+/// and grouped aggregates, or a sort) requires reading every input partition. Executing
+/// each such partition independently — the point of partitioned execution — therefore
+/// re-runs the whole pre-shuffle pipeline once per partition and is usually slower than a
+/// single execution. This mode controls how that case is handled.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum PartitionMode {
+    /// One descriptor per natural output partition; warn when the plan shuffles. Default —
+    /// preserves the partition count the caller's plan produced.
+    #[default]
+    Multi,
+    /// Collapse to a single coalesced partition when the plan shuffles, otherwise one
+    /// descriptor per natural output partition.
+    Auto,
+    /// Always collapse to a single coalesced partition.
+    Single,
+}
+
+impl PartitionMode {
+    fn from_option(value: &str) -> adbc_core::error::Result<Self> {
+        match value {
+            "multi" => Ok(Self::Multi),
+            "auto" => Ok(Self::Auto),
+            "single" => Ok(Self::Single),
+            other => Err(ErrorHelper::invalid_argument()
+                .format(format_args!(
+                    "unknown {OPTION_PARTITION_MODE} '{other}' (expected auto, single, or multi)"
+                ))
+                .to_adbc()),
+        }
+    }
+
+    fn as_option(self) -> &'static str {
+        match self {
+            Self::Multi => "multi",
+            Self::Auto => "auto",
+            Self::Single => "single",
+        }
+    }
+}
+
+/// True if executing a single output partition of `plan` would re-read all input partitions,
+/// i.e. the plan contains a repartition or sort shuffle. Such plans are poor candidates for
+/// distributed partitioned execution (each partition re-runs the pre-shuffle pipeline).
+fn plan_has_shuffle(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    use datafusion::physical_plan::repartition::RepartitionExec;
+    use datafusion::physical_plan::sorts::sort::SortExec;
+    use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
+
+    let node = plan.as_any();
+    if node.is::<RepartitionExec>()
+        || node.is::<SortExec>()
+        || node.is::<SortPreservingMergeExec>()
+    {
+        return true;
+    }
+    plan.children().into_iter().any(plan_has_shuffle)
+}
+
 pub struct DataFusionStatement {
     runtime: Arc<Runtime>,
     ctx: Arc<SessionContext>,
     codec: Option<PhysicalCodec>,
+    partition_mode: PartitionMode,
     query: Option<QueryState>,
     bound: Option<Box<dyn RecordBatchReader + Send>>,
     ingest: BulkIngestState<ErrorHelper>,
@@ -893,6 +961,15 @@ impl Optionable for DataFusionStatement {
                     .message("temporary tables are not supported")
                     .to_adbc()),
             },
+            OPTION_PARTITION_MODE => match value {
+                OptionValue::String(v) => {
+                    self.partition_mode = PartitionMode::from_option(&v)?;
+                    Ok(())
+                }
+                _ => Err(ErrorHelper::set_invalid_option(&key, &value)
+                    .message("must be a string")
+                    .to_adbc()),
+            },
             _ => Err(ErrorHelper::set_unknown_option(&key).to_adbc()),
         }
     }
@@ -905,6 +982,7 @@ impl Optionable for DataFusionStatement {
                     .format(format_args!("{key:?} has not been set"))
                     .to_adbc()),
             },
+            OPTION_PARTITION_MODE => Ok(self.partition_mode.as_option().to_string()),
             _ => Err(ErrorHelper::get_unknown_option(&key).to_adbc()),
         }
     }
@@ -1194,7 +1272,30 @@ impl Statement for DataFusionStatement {
                 .create_physical_plan()
                 .await
                 .map_err(ErrorHelper::from_datafusion)?;
+            let natural_n = physical.output_partitioning().partition_count() as u32;
+
+            // A plan that shuffles re-runs its pre-shuffle pipeline once per partition when
+            // executed partition-by-partition. Depending on partition_mode, collapse such a
+            // plan to a single coalesced partition, or keep the natural partitions and warn.
+            let shuffle = plan_has_shuffle(&physical);
+            let collapse = matches!(self.partition_mode, PartitionMode::Single)
+                || (matches!(self.partition_mode, PartitionMode::Auto) && shuffle);
+
+            let physical = if collapse && natural_n > 1 {
+                Arc::new(CoalescePartitionsExec::new(physical)) as Arc<dyn ExecutionPlan>
+            } else {
+                physical
+            };
             let n = physical.output_partitioning().partition_count() as u32;
+
+            if shuffle && !collapse && n > 1 {
+                log::warn!(
+                    "execute_partitions: plan contains a shuffle (repartition/sort), so each of \
+                     the {n} partitions re-runs the pre-shuffle pipeline; this is often slower \
+                     than a single execution. Set {OPTION_PARTITION_MODE}=auto or =single to \
+                     coalesce into one partition."
+                );
+            }
 
             // Serialize the already-built physical plan so read_partition deserializes it
             // instead of re-planning. The default codec covers built-in nodes; a registered

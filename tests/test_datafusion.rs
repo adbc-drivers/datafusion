@@ -539,3 +539,113 @@ fn test_execute_partitions_prepared() {
     keys.sort();
     assert_eq!(keys, (0..8).collect::<Vec<_>>());
 }
+
+const PARTITION_MODE: &str = "datafusion.partition_mode";
+
+/// A connection with a two-partition in-memory table `p` (keys 0..4 and 4..8) and no
+/// repartitioning forced, so `SELECT * FROM p` is a shuffle-free two-partition scan.
+fn connection_with_two_partition_table() -> DataFusionConnection {
+    let init: ContextInit = Arc::new(|ctx, _opts| {
+        let schema: SchemaRef = Arc::new(Schema::new(vec![
+            Field::new("k", DataType::Int32, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let part = |lo: i32, hi: i32| {
+            let keys: ArrayRef = Arc::new(Int32Array::from((lo..hi).collect::<Vec<_>>()));
+            let vals: ArrayRef =
+                Arc::new(Int32Array::from((lo..hi).map(|i| i * 10).collect::<Vec<_>>()));
+            RecordBatch::try_new(schema.clone(), vec![keys, vals]).unwrap()
+        };
+        // Two batch groups => two table partitions.
+        let table = MemTable::try_new(schema.clone(), vec![vec![part(0, 4)], vec![part(4, 8)]])?;
+        ctx.register_table("p", Arc::new(table))?;
+        Ok(())
+    });
+    let mut driver = DataFusionDriver::new_with_context_init(None, init);
+    let database = driver.new_database().unwrap();
+    database.new_connection().unwrap()
+}
+
+#[test]
+fn test_partition_mode_single_collapses_to_one() {
+    // GROUP_BY_QUERY hash-repartitions to 4 partitions; single mode must coalesce to one.
+    let mut connection = connection_with_target_partitions(4);
+    let mut statement = connection.new_statement().unwrap();
+    statement.set_sql_query(GROUP_BY_QUERY).unwrap();
+    statement
+        .set_option(
+            OptionStatement::Other(PARTITION_MODE.to_string()),
+            OptionValue::String("single".to_string()),
+        )
+        .unwrap();
+
+    let result = statement.execute_partitions().unwrap();
+    assert_eq!(result.partitions.len(), 1, "single mode => one descriptor");
+
+    // The lone descriptor reproduces every key — the coalesced plan runs the whole query.
+    let mut keys = read_partition_keys(&connection, &result.partitions[0]);
+    keys.sort();
+    assert_eq!(keys, (0..8).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_partition_mode_auto_collapses_shuffle() {
+    // Aggregate has a shuffle => auto coalesces to one partition.
+    let mut connection = connection_with_target_partitions(4);
+    let mut statement = connection.new_statement().unwrap();
+    statement.set_sql_query(GROUP_BY_QUERY).unwrap();
+    statement
+        .set_option(
+            OptionStatement::Other(PARTITION_MODE.to_string()),
+            OptionValue::String("auto".to_string()),
+        )
+        .unwrap();
+
+    let result = statement.execute_partitions().unwrap();
+    assert_eq!(
+        result.partitions.len(),
+        1,
+        "auto mode collapses a shuffling plan to one partition"
+    );
+}
+
+#[test]
+fn test_partition_mode_auto_keeps_shuffle_free_partitions() {
+    // A plain two-partition scan has no shuffle => auto keeps the natural partitions.
+    let mut connection = connection_with_two_partition_table();
+    let mut statement = connection.new_statement().unwrap();
+    statement.set_sql_query("SELECT k, v FROM p").unwrap();
+    statement
+        .set_option(
+            OptionStatement::Other(PARTITION_MODE.to_string()),
+            OptionValue::String("auto".to_string()),
+        )
+        .unwrap();
+
+    let result = statement.execute_partitions().unwrap();
+    assert_eq!(
+        result.partitions.len(),
+        2,
+        "auto keeps natural partitions when the plan does not shuffle"
+    );
+
+    let mut keys = Vec::new();
+    for descriptor in &result.partitions {
+        keys.extend(read_partition_keys(&connection, descriptor));
+    }
+    keys.sort();
+    assert_eq!(keys, (0..8).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_partition_mode_rejects_unknown_value() {
+    let mut connection = connection_with_target_partitions(4);
+    let mut statement = connection.new_statement().unwrap();
+    let err = statement
+        .set_option(
+            OptionStatement::Other(PARTITION_MODE.to_string()),
+            OptionValue::String("nonsense".to_string()),
+        )
+        .unwrap_err();
+    assert_eq!(err.status, adbc_core::error::Status::InvalidArguments);
+}
