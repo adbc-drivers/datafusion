@@ -1183,7 +1183,7 @@ impl Statement for DataFusionStatement {
                 Some(q) => q.execute(&self.ctx).await?,
                 None => {
                     return Err(ErrorHelper::invalid_state()
-                        .message("no query or Substrait plan has been set")
+                        .message("no query has been set")
                         .to_adbc());
                 }
             };
@@ -1209,7 +1209,7 @@ impl Statement for DataFusionStatement {
                 Some(q) => q.execute(&self.ctx).await?,
                 None => {
                     return Err(ErrorHelper::invalid_state()
-                        .message("no query or Substrait plan has been set")
+                        .message("no query has been set")
                         .to_adbc());
                 }
             };
@@ -1247,11 +1247,11 @@ impl Statement for DataFusionStatement {
     fn execute_partitions(&mut self) -> adbc_core::error::Result<adbc_core::PartitionedResult> {
         let query = self.query.as_ref().ok_or_else(|| {
             ErrorHelper::invalid_state()
-                .message("no query or Substrait plan has been set")
+                .message("no query has been set")
                 .to_adbc()
         })?;
         self.runtime.block_on(async {
-            // Plan logically (registers object store), then build the physical plan.
+            // query.execute also registers the plan's object stores, required before execution.
             let df = query.execute(&self.ctx).await?;
             let schema = df.schema().as_arrow().clone();
             let physical = df
@@ -1283,9 +1283,9 @@ impl Statement for DataFusionStatement {
                 );
             }
 
-            // Serialize the physical plan into each descriptor; read_partition deserializes
-            // rather than re-plans. The default codec covers built-in nodes, a registered
-            // codec also covers custom ones; a node neither can encode fails the query.
+            // Serialize the physical plan into each descriptor. The default codec covers
+            // built-in nodes, a registered codec also covers custom ones; a node neither
+            // can encode fails the query.
             let default_codec = datafusion_proto::physical_plan::DefaultPhysicalExtensionCodec {};
             let codec: &dyn datafusion_proto::physical_plan::PhysicalExtensionCodec =
                 self.codec.as_deref().unwrap_or(&default_codec);
