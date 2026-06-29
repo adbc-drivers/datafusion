@@ -478,6 +478,14 @@ fn test_execute_partitions_returns_one_descriptor_per_output_partition() {
     let mut connection = connection_with_target_partitions(4);
     let mut statement = connection.new_statement().unwrap();
     statement.set_sql_query(GROUP_BY_QUERY).unwrap();
+    // GROUP_BY_QUERY shuffles, so the default `auto` mode would collapse it; force `multi`
+    // to exercise one descriptor per natural partition.
+    statement
+        .set_option(
+            OptionStatement::Other(PARTITION_MODE.to_string()),
+            OptionValue::String("multi".to_string()),
+        )
+        .unwrap();
 
     let result = statement.execute_partitions().unwrap();
 
@@ -505,6 +513,12 @@ fn test_read_partition_executes_serialized_plan() {
     let mut planner = connection_with_target_partitions(4);
     let mut statement = planner.new_statement().unwrap();
     statement.set_sql_query(GROUP_BY_QUERY).unwrap();
+    statement
+        .set_option(
+            OptionStatement::Other(PARTITION_MODE.to_string()),
+            OptionValue::String("multi".to_string()),
+        )
+        .unwrap();
     let result = statement.execute_partitions().unwrap();
     assert!(result.partitions.len() > 1);
 
@@ -527,6 +541,12 @@ fn test_execute_partitions_prepared() {
     let mut connection = connection_with_target_partitions(4);
     let mut statement = connection.new_statement().unwrap();
     statement.set_sql_query(GROUP_BY_QUERY).unwrap();
+    statement
+        .set_option(
+            OptionStatement::Other(PARTITION_MODE.to_string()),
+            OptionValue::String("multi".to_string()),
+        )
+        .unwrap();
     statement.prepare().unwrap();
 
     let result = statement.execute_partitions().unwrap();
@@ -552,8 +572,9 @@ fn connection_with_two_partition_table() -> DataFusionConnection {
         ]));
         let part = |lo: i32, hi: i32| {
             let keys: ArrayRef = Arc::new(Int32Array::from((lo..hi).collect::<Vec<_>>()));
-            let vals: ArrayRef =
-                Arc::new(Int32Array::from((lo..hi).map(|i| i * 10).collect::<Vec<_>>()));
+            let vals: ArrayRef = Arc::new(Int32Array::from(
+                (lo..hi).map(|i| i * 10).collect::<Vec<_>>(),
+            ));
             RecordBatch::try_new(schema.clone(), vec![keys, vals]).unwrap()
         };
         // Two batch groups => two table partitions.

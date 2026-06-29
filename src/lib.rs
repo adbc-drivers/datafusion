@@ -325,12 +325,7 @@ impl DataFusionDriver {
     }
 
     /// Register an extension codec for serializing custom `ExecutionPlan` nodes in partition
-    /// descriptors (see [`PhysicalCodec`]). Chains onto any constructor; only needed when a
-    /// provider emits custom nodes:
-    ///
-    /// ```ignore
-    /// let driver = DataFusionDriver::new_with_context_init(handle, init).with_codec(codec);
-    /// ```
+    /// descriptors (see [`PhysicalCodec`]).
     pub fn with_codec(mut self, codec: PhysicalCodec) -> Self {
         self.codec = Some(codec);
         self
@@ -743,14 +738,12 @@ impl Connection for DataFusionConnection {
     ) -> Result<Box<dyn RecordBatchReader + Send>> {
         let (index, plan_bytes) = decode_descriptor(partition.as_ref())?;
         self.runtime.block_on(async {
-            // Deserialize the physical plan the driver already built and execute one
-            // partition — no logical/physical re-planning.
             let task_ctx = self.ctx.task_ctx();
             let default_codec = datafusion_proto::physical_plan::DefaultPhysicalExtensionCodec {};
             let codec: &dyn datafusion_proto::physical_plan::PhysicalExtensionCodec =
                 self.codec.as_deref().unwrap_or(&default_codec);
-            // Deserialize once per distinct plan and reuse across partition indices; a
-            // shared connection then pays the decode cost once per executor, not per task.
+            // Cache the deserialized plan per distinct payload: a connection reading several
+            // partitions of one plan pays the proto decode once, not once per partition.
             let physical = {
                 let mut cache = self.plan_cache.lock();
                 if let Some(plan) = cache.get(plan_bytes.as_slice()) {
@@ -819,18 +812,16 @@ impl QueryState {
     }
 }
 
-/// Current partition-descriptor format version. Descriptors are opaque and version-local:
-/// the same driver build both produces and consumes them, so older layouts are not decoded.
-/// The version byte lets the format evolve without silently misreading an old payload.
+/// Partition-descriptor format version. The same driver build produces and consumes
+/// descriptors, so the byte exists only to reject a payload from a different layout.
 const DESCRIPTOR_VERSION: u8 = 1;
 
 /// Fixed descriptor header length: `version(1) + index(4)`.
 const DESCRIPTOR_HEADER_LEN: usize = 5;
 
-/// Size above which a serialized plan payload is logged as a warning. The full plan is
-/// copied into every one of the N partition descriptors, so a large plan is paid N times
-/// over. Operator-only plans are a few KB and never trip this; the threshold mainly catches
-/// plans that inline data (e.g. a custom node embedding its rows) or very large queries.
+/// Warn when a serialized plan exceeds this size: the plan is copied into all N descriptors,
+/// so a large payload is paid N times. Operator-only plans are a few KB; this mainly catches
+/// plans that inline data.
 const PROTO_DESCRIPTOR_WARN_BYTES: usize = 8 << 20; // 8 MiB
 
 /// Build a self-contained partition descriptor:
@@ -877,12 +868,13 @@ const OPTION_PARTITION_MODE: &str = "datafusion.partition_mode";
 /// single execution. This mode controls how that case is handled.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum PartitionMode {
-    /// One descriptor per natural output partition; warn when the plan shuffles. Default —
-    /// preserves the partition count the caller's plan produced.
-    #[default]
+    /// One descriptor per natural output partition; warn when the plan shuffles. Preserves
+    /// the partition count the caller's plan produced even when that is slower.
     Multi,
     /// Collapse to a single coalesced partition when the plan shuffles, otherwise one
-    /// descriptor per natural output partition.
+    /// descriptor per natural output partition. Default — never silently re-runs a shuffle
+    /// once per partition.
+    #[default]
     Auto,
     /// Always collapse to a single coalesced partition. This yields the same one-partition
     /// result as calling [`Statement::execute`] directly, just delivered through the
@@ -923,9 +915,7 @@ fn plan_has_shuffle(plan: &Arc<dyn ExecutionPlan>) -> bool {
     use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
 
     let node = plan.as_any();
-    if node.is::<RepartitionExec>()
-        || node.is::<SortExec>()
-        || node.is::<SortPreservingMergeExec>()
+    if node.is::<RepartitionExec>() || node.is::<SortExec>() || node.is::<SortPreservingMergeExec>()
     {
         return true;
     }
@@ -1267,8 +1257,7 @@ impl Statement for DataFusionStatement {
                 .to_adbc()
         })?;
         self.runtime.block_on(async {
-            // Plan logically (registers object store) and build the physical plan so we
-            // can count its natural output partitions.
+            // Plan logically (registers object store), then build the physical plan.
             let df = query.execute(&self.ctx).await?;
             let schema = df.schema().as_arrow().clone();
             let physical = df
@@ -1300,10 +1289,9 @@ impl Statement for DataFusionStatement {
                 );
             }
 
-            // Serialize the already-built physical plan so read_partition deserializes it
-            // instead of re-planning. The default codec covers built-in nodes; a registered
-            // codec additionally covers a provider's custom nodes. A node neither can encode
-            // fails the query (no re-plan fallback).
+            // Serialize the physical plan into each descriptor; read_partition deserializes
+            // rather than re-plans. The default codec covers built-in nodes, a registered
+            // codec also covers custom ones; a node neither can encode fails the query.
             let default_codec = datafusion_proto::physical_plan::DefaultPhysicalExtensionCodec {};
             let codec: &dyn datafusion_proto::physical_plan::PhysicalExtensionCodec =
                 self.codec.as_deref().unwrap_or(&default_codec);

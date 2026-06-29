@@ -50,60 +50,43 @@ shipped to other processes or machines (for example, a distributed engine fannin
 descriptor out to a worker). A descriptor is self-contained — the only thing that travels
 between the planner and the reader.
 
-`execute_partitions` serializes the already-built **physical plan** into each descriptor
-([`datafusion-proto`](https://docs.rs/datafusion-proto)), and `read_partition`
-**deserializes** it and executes one partition. Because the reader runs the exact plan the
-planner built, every reader agrees on the partition layout and the reader needs only the
-plan bytes (plus any registered providers and codec) — not the original query text or the
-planner's session configuration.
+A descriptor carries the planner's physical plan, so a reader runs exactly the plan the
+planner built — it needs no query text or session configuration, only the descriptor (plus
+any providers and codec the plan references).
 
 ### Shuffling plans
 
-Partitioned execution shines when each output partition reads independent input — a
-partitioned scan, or filters/projections over one. When the plan **shuffles** (a hash
-repartition for a join or grouped aggregate, or a sort), producing one output partition
-requires reading *all* input, so executing partitions independently re-runs the whole
+Partitioned execution is fast when each output partition reads independent input. When the
+plan **shuffles** (a hash repartition for a join or grouped aggregate, or a sort), every
+output partition reads *all* input, so executing partitions independently re-runs the
 pre-shuffle pipeline once per partition — usually slower than a single execution.
 
 The statement option `datafusion.partition_mode` controls this:
 
 | Value | Behavior |
 | --- | --- |
-| `multi` (default) | One descriptor per natural output partition; logs a warning if the plan shuffles. |
-| `auto` | Collapse to a single partition when the plan shuffles, otherwise natural partitions. |
+| `auto` (default) | Collapse to a single partition when the plan shuffles, otherwise natural partitions. |
+| `multi` | One descriptor per natural output partition; logs a warning if the plan shuffles. |
 | `single` | Always collapse to a single partition. |
 
 ```rust
 statement.set_option(
     OptionStatement::Other("datafusion.partition_mode".into()),
-    OptionValue::String("auto".into()),
+    OptionValue::String("multi".into()),
 )?;
 ```
 
-`single` produces the same one-partition result as calling `execute` directly — it just
-delivers it through the partition API. Prefer `execute` unless your caller is built around
-`execute_partitions`/`read_partition` and wants uniform handling.
+`single` delivers the same one-partition result as `execute`, through the partition API.
 
 ### Custom nodes
 
-`datafusion-proto` serializes built-in nodes with no configuration. A provider that emits
-custom `ExecutionPlan` nodes must register a `PhysicalExtensionCodec` alongside the
-`ContextInit` hook so those nodes round-trip:
+A provider that emits custom `ExecutionPlan` nodes must register a `PhysicalExtensionCodec`
+so those nodes round-trip into descriptors; without one, a plan containing a custom node
+fails `execute_partitions`. See `tests/test_proto_partitions.rs` for a worked example.
 
 ```rust
 let driver = DataFusionDriver::new_with_context_init(handle, context_init).with_codec(codec);
 ```
-
-The custom node must be reconstructable from its encoded bytes plus the hook-built session.
-With no codec the driver uses the default codec, which covers built-in nodes only; a plan
-containing a custom node the codec cannot encode **fails** `execute_partitions` rather than
-falling back to a re-plan path.
-
-`read_partition` caches a deserialized plan per connection, keyed by the descriptor's
-plan bytes, so a connection that reads several partitions of the same plan pays the
-decode cost once per distinct plan rather than once per partition.
-
-See `tests/test_proto_partitions.rs` for a worked custom provider + codec example.
 
 ## Building
 
