@@ -77,15 +77,9 @@ pub type ContextInit = Arc<
     dyn Fn(&mut SessionContext, &mut DatabaseOpts) -> datafusion::error::Result<()> + Send + Sync,
 >;
 
-/// Optional extension codec for serializing custom `ExecutionPlan` nodes.
-///
-/// Partitioned execution serializes the physical plan into each partition descriptor
-/// (`datafusion-proto`) so `read_partition` can execute it without the original query.
-/// `datafusion-proto` serializes built-in DataFusion nodes on its own; a provider that
-/// emits custom `ExecutionPlan` nodes registers a codec here so those nodes can be encoded
-/// and reconstructed from their bytes plus the hook-built session. With no codec the driver
-/// uses the default codec, which handles built-in nodes only — a plan containing a custom
-/// node the codec cannot encode fails `execute_partitions`.
+/// Optional codec for serializing custom physical-plan extensions (`ExecutionPlan` nodes,
+/// UDFs, exprs) into partition descriptors. Without one, a plan containing a custom
+/// extension fails `execute_partitions`.
 pub type PhysicalCodec = Arc<dyn datafusion_proto::physical_plan::PhysicalExtensionCodec>;
 
 impl ErrorHelper {
@@ -324,8 +318,8 @@ impl DataFusionDriver {
         }
     }
 
-    /// Register an extension codec for serializing custom `ExecutionPlan` nodes in partition
-    /// descriptors (see [`PhysicalCodec`]).
+    /// Register an extension codec for serializing custom physical-plan extensions
+    /// (`ExecutionPlan` nodes, UDFs, exprs) in partition descriptors (see [`PhysicalCodec`]).
     pub fn with_codec(mut self, codec: PhysicalCodec) -> Self {
         self.codec = Some(codec);
         self

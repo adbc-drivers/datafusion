@@ -78,11 +78,11 @@ statement.set_option(
 
 `single` delivers the same one-partition result as `execute`, through the partition API.
 
-### Custom nodes
+### Custom extensions
 
-A provider that emits custom `ExecutionPlan` nodes must register a `PhysicalExtensionCodec`
-so those nodes round-trip into descriptors; without one, a plan containing a custom node
-fails `execute_partitions`. See `tests/test_proto_partitions.rs` for a worked example.
+A provider emitting custom physical-plan extensions (`ExecutionPlan` nodes, UDFs, exprs)
+must register a `PhysicalExtensionCodec` so they round-trip into descriptors; without one,
+such a plan fails `execute_partitions`. See `tests/test_proto_partitions.rs` for an example.
 
 ```rust
 let driver = DataFusionDriver::new_with_context_init(handle, context_init).with_codec(codec);
