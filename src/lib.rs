@@ -40,7 +40,10 @@ use prost::Message;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
+
+use lru::LruCache;
 
 use arrow_array::{RecordBatch, RecordBatchReader};
 use arrow_schema::{ArrowError, SchemaRef};
@@ -344,6 +347,7 @@ impl DataFusionDriver {
             handle: self.handle.clone(),
             ctx: Arc::new(ctx),
             codec: self.codec.clone(),
+            plan_cache: Arc::new(new_plan_cache()),
         })
     }
 }
@@ -384,6 +388,9 @@ pub struct DataFusionDatabase {
     handle: Option<tokio::runtime::Handle>,
     ctx: Arc<SessionContext>,
     codec: Option<PhysicalCodec>,
+    /// Shared by every connection this database opens, so all of an executor's
+    /// per-task connections reuse one deserialized plan per distinct plan bytes.
+    plan_cache: Arc<PlanCache>,
 }
 
 impl Optionable for DataFusionDatabase {
@@ -442,7 +449,7 @@ impl Database for DataFusionDatabase {
             runtime: Arc::new(runtime),
             ctx: self.ctx.clone(),
             codec: self.codec.clone(),
-            plan_cache: Arc::new(PlanCache::default()),
+            plan_cache: Arc::clone(&self.plan_cache),
         })
     }
 
@@ -466,7 +473,7 @@ impl Database for DataFusionDatabase {
             runtime: Arc::new(runtime),
             ctx: self.ctx.clone(),
             codec: self.codec.clone(),
-            plan_cache: Arc::new(PlanCache::default()),
+            plan_cache: Arc::clone(&self.plan_cache),
         };
 
         for (key, value) in opts {
@@ -480,13 +487,22 @@ impl Database for DataFusionDatabase {
 /// Cache of deserialized physical plans, keyed by descriptor plan bytes.
 ///
 /// `read_partition` deserializes a given plan once and reuses it across every partition
-/// index. When a connection is shared across an executor's task slots (as connectors are
-/// expected to do), this collapses N per-task deserializes into one per distinct plan.
-type PlanCache = parking_lot::Mutex<HashMap<Vec<u8>, Arc<dyn ExecutionPlan>>>;
+/// index. The cache lives on [`DataFusionDatabase`] and is shared (via `Arc`) by every
+/// connection opened from it. Since connectors open one connection per task but cache one
+/// database per executor, this collapses N per-task deserializes into one per distinct plan
+/// per executor.
+type PlanCache = parking_lot::Mutex<LruCache<Vec<u8>, Arc<dyn ExecutionPlan>>>;
 
-/// Bound on distinct cached plans, so a long-lived connection running many different
-/// queries does not accumulate plans without limit. On overflow the cache is cleared.
-const PLAN_CACHE_CAP: usize = 16;
+/// Bound on distinct cached plans, so a database serving many different queries does not
+/// accumulate plans without limit. On overflow the least-recently-used plan is evicted;
+/// already-handed-out `Arc`s stay alive until their tasks finish.
+const PLAN_CACHE_CAP: usize = 64;
+
+fn new_plan_cache() -> PlanCache {
+    parking_lot::Mutex::new(LruCache::new(
+        NonZeroUsize::new(PLAN_CACHE_CAP).expect("PLAN_CACHE_CAP is nonzero"),
+    ))
+}
 
 pub struct DataFusionConnection {
     runtime: Arc<Runtime>,
@@ -736,8 +752,9 @@ impl Connection for DataFusionConnection {
             let default_codec = datafusion_proto::physical_plan::DefaultPhysicalExtensionCodec {};
             let codec: &dyn datafusion_proto::physical_plan::PhysicalExtensionCodec =
                 self.codec.as_deref().unwrap_or(&default_codec);
-            // Cache the deserialized plan per distinct payload: a connection reading several
-            // partitions of one plan pays the proto decode once, not once per partition.
+            // Cache the deserialized plan per distinct payload. The cache is shared across
+            // all connections from this database, so every task reading a partition of the
+            // same plan pays the proto decode once, not once per task.
             let physical = {
                 let mut cache = self.plan_cache.lock();
                 if let Some(plan) = cache.get(plan_bytes.as_slice()) {
@@ -750,10 +767,7 @@ impl Connection for DataFusionConnection {
                             codec,
                         )
                         .map_err(ErrorHelper::from_datafusion)?;
-                    if cache.len() >= PLAN_CACHE_CAP {
-                        cache.clear();
-                    }
-                    cache.insert(plan_bytes.clone(), plan.clone());
+                    cache.put(plan_bytes.clone(), plan.clone());
                     plan
                 }
             };
