@@ -42,6 +42,7 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use lru::LruCache;
 
@@ -348,6 +349,7 @@ impl DataFusionDriver {
             ctx: Arc::new(ctx),
             codec: self.codec.clone(),
             plan_cache: Arc::new(new_plan_cache()),
+            plan_deserializations: Arc::new(AtomicU64::new(0)),
         })
     }
 }
@@ -391,6 +393,9 @@ pub struct DataFusionDatabase {
     /// Shared by every connection this database opens, so all of an executor's
     /// per-task connections reuse one deserialized plan per distinct plan bytes.
     plan_cache: Arc<PlanCache>,
+    /// Count of plan deserializations (cache misses) across all connections.
+    /// See [`OPTION_PLAN_DESERIALIZE_COUNT`]; used for testing and evaluation.
+    plan_deserializations: Arc<AtomicU64>,
 }
 
 impl Optionable for DataFusionDatabase {
@@ -426,7 +431,12 @@ impl Optionable for DataFusionDatabase {
     }
 
     fn get_option_int(&self, key: Self::Option) -> adbc_core::error::Result<i64> {
-        Err(ErrorHelper::get_unknown_option(&key).to_adbc())
+        match key.as_ref() {
+            OPTION_PLAN_DESERIALIZE_COUNT => {
+                Ok(self.plan_deserializations.load(Ordering::Relaxed) as i64)
+            }
+            _ => Err(ErrorHelper::get_unknown_option(&key).to_adbc()),
+        }
     }
 
     fn get_option_double(&self, key: Self::Option) -> adbc_core::error::Result<f64> {
@@ -450,6 +460,7 @@ impl Database for DataFusionDatabase {
             ctx: self.ctx.clone(),
             codec: self.codec.clone(),
             plan_cache: Arc::clone(&self.plan_cache),
+            plan_deserializations: Arc::clone(&self.plan_deserializations),
         })
     }
 
@@ -474,6 +485,7 @@ impl Database for DataFusionDatabase {
             ctx: self.ctx.clone(),
             codec: self.codec.clone(),
             plan_cache: Arc::clone(&self.plan_cache),
+            plan_deserializations: Arc::clone(&self.plan_deserializations),
         };
 
         for (key, value) in opts {
@@ -504,11 +516,20 @@ fn new_plan_cache() -> PlanCache {
     ))
 }
 
+/// Read-only integer option: number of physical plans this database has deserialized
+/// from partition descriptors (i.e. plan-cache misses across all its connections).
+///
+/// Intended primarily for testing and evaluation: it lets a caller confirm the plan cache
+/// is working — e.g. asserting deserializations equal the number of distinct plans rather
+/// than the number of partitions read. It is not part of the ADBC option contract.
+pub const OPTION_PLAN_DESERIALIZE_COUNT: &str = "adbc.datafusion.plan_deserialize_count";
+
 pub struct DataFusionConnection {
     runtime: Arc<Runtime>,
     ctx: Arc<SessionContext>,
     codec: Option<PhysicalCodec>,
     plan_cache: Arc<PlanCache>,
+    plan_deserializations: Arc<AtomicU64>,
 }
 
 impl Optionable for DataFusionConnection {
@@ -609,7 +630,12 @@ impl Optionable for DataFusionConnection {
     }
 
     fn get_option_int(&self, key: Self::Option) -> adbc_core::error::Result<i64> {
-        Err(ErrorHelper::get_unknown_option(&key).to_adbc())
+        match key.as_ref() {
+            OPTION_PLAN_DESERIALIZE_COUNT => {
+                Ok(self.plan_deserializations.load(Ordering::Relaxed) as i64)
+            }
+            _ => Err(ErrorHelper::get_unknown_option(&key).to_adbc()),
+        }
     }
 
     fn get_option_double(&self, key: Self::Option) -> adbc_core::error::Result<f64> {
@@ -767,6 +793,7 @@ impl Connection for DataFusionConnection {
                             codec,
                         )
                         .map_err(ErrorHelper::from_datafusion)?;
+                    self.plan_deserializations.fetch_add(1, Ordering::Relaxed);
                     cache.put(plan_bytes.clone(), plan.clone());
                     plan
                 }

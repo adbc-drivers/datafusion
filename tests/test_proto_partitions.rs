@@ -24,8 +24,12 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use adbc_core::{Connection, Database, Driver, Statement};
-use adbc_driver_datafusion::{ContextInit, DataFusionConnection, DataFusionDriver, PhysicalCodec};
+use adbc_core::options::OptionDatabase;
+use adbc_core::{Connection, Database, Driver, Optionable, Statement};
+use adbc_driver_datafusion::{
+    ContextInit, DataFusionConnection, DataFusionDatabase, DataFusionDriver,
+    OPTION_PLAN_DESERIALIZE_COUNT, PhysicalCodec,
+};
 use arrow_array::{ArrayRef, Int32Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use async_trait::async_trait;
@@ -217,7 +221,7 @@ impl PhysicalExtensionCodec for FailingCodec {
     }
 }
 
-/// Delegates to [`CustomCodec`] but counts `try_decode` calls, to prove the per-connection
+/// Delegates to [`CustomCodec`] but counts `try_decode` calls, to prove the shared
 /// plan cache deserializes a given plan only once.
 #[derive(Debug)]
 struct CountingCodec {
@@ -244,8 +248,8 @@ const VALUES: i32 = 8;
 const N_PARTITIONS: usize = 3;
 const QUERY: &str = "SELECT v FROM ct";
 
-/// Build a connection whose `ct` table is the custom provider, with the given codec (if any).
-fn custom_connection(codec: Option<PhysicalCodec>) -> DataFusionConnection {
+/// Build a database whose `ct` table is the custom provider, with the given codec (if any).
+fn custom_database(codec: Option<PhysicalCodec>) -> DataFusionDatabase {
     let init: ContextInit = Arc::new(|ctx, _opts| {
         ctx.register_table(
             "ct",
@@ -260,8 +264,12 @@ fn custom_connection(codec: Option<PhysicalCodec>) -> DataFusionConnection {
     if let Some(codec) = codec {
         driver = driver.with_codec(codec);
     }
-    let database = driver.new_database().unwrap();
-    database.new_connection().unwrap()
+    driver.new_database().unwrap()
+}
+
+/// Build a connection whose `ct` table is the custom provider, with the given codec (if any).
+fn custom_connection(codec: Option<PhysicalCodec>) -> DataFusionConnection {
+    custom_database(codec).new_connection().unwrap()
 }
 
 /// Read every `v` value produced by the descriptor.
@@ -378,5 +386,49 @@ fn plan_cache_deserializes_once_across_partitions() {
         decodes.load(Ordering::SeqCst),
         1,
         "plan should be deserialized once and cached across partition indices"
+    );
+}
+
+#[test]
+fn plan_cache_is_shared_across_connections_from_one_database() {
+    // Mirrors the connector's real shape: plan on one connection, then read each partition
+    // on a SEPARATE connection (as per-task connections would). All connections come from
+    // one database, so the database-scoped cache should still deserialize the plan once.
+    let decodes = Arc::new(AtomicUsize::new(0));
+    let codec: PhysicalCodec = Arc::new(CountingCodec {
+        decodes: decodes.clone(),
+    });
+    let database = custom_database(Some(codec));
+
+    let mut planner = database.new_connection().unwrap();
+    let mut statement = planner.new_statement().unwrap();
+    statement.set_sql_query(QUERY).unwrap();
+    let result = statement.execute_partitions().unwrap();
+    assert_eq!(result.partitions.len(), N_PARTITIONS);
+
+    let mut values = Vec::new();
+    for descriptor in &result.partitions {
+        // A fresh connection per partition — the connection-level cache would miss every time.
+        let executor = database.new_connection().unwrap();
+        values.extend(read_values(&executor, descriptor));
+    }
+    values.sort();
+    assert_eq!(values, (0..VALUES).collect::<Vec<_>>());
+
+    assert_eq!(
+        decodes.load(Ordering::SeqCst),
+        1,
+        "shared cache should deserialize the plan once across per-task connections"
+    );
+
+    // The driver's own counter (exposed for testing/evaluation) agrees.
+    let count = database
+        .get_option_int(OptionDatabase::Other(
+            OPTION_PLAN_DESERIALIZE_COUNT.to_string(),
+        ))
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "plan-deserialize counter should equal distinct plans"
     );
 }
