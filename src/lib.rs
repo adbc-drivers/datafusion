@@ -30,6 +30,8 @@ use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::datasource::MemTable;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::logical_expr::dml::InsertOp;
+use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 use datafusion::prelude::*;
 use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
 use datafusion_substrait::substrait::proto::Plan;
@@ -38,7 +40,11 @@ use prost::Message;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use lru::LruCache;
 
 use arrow_array::{RecordBatch, RecordBatchReader};
 use arrow_schema::{ArrowError, SchemaRef};
@@ -74,6 +80,11 @@ pub type DatabaseOpts = HashMap<OptionDatabase, OptionValue>;
 pub type ContextInit = Arc<
     dyn Fn(&mut SessionContext, &mut DatabaseOpts) -> datafusion::error::Result<()> + Send + Sync,
 >;
+
+/// Optional codec for serializing custom physical-plan extensions (`ExecutionPlan` nodes,
+/// UDFs, exprs) into partition descriptors. Without one, a plan containing a custom
+/// extension fails `execute_partitions`.
+pub type PhysicalCodec = Arc<dyn datafusion_proto::physical_plan::PhysicalExtensionCodec>;
 
 impl ErrorHelper {
     fn from_datafusion(err: datafusion::error::DataFusionError) -> DriverError {
@@ -258,6 +269,19 @@ impl DataFusionReader {
             schema: schema.into(),
         })
     }
+
+    /// Construct a reader directly from a single-partition stream.
+    pub(crate) fn from_stream(
+        runtime: Arc<Runtime>,
+        stream: datafusion::execution::SendableRecordBatchStream,
+        schema: SchemaRef,
+    ) -> Self {
+        Self {
+            runtime,
+            stream,
+            schema,
+        }
+    }
 }
 
 impl Iterator for DataFusionReader {
@@ -278,6 +302,7 @@ impl RecordBatchReader for DataFusionReader {
 pub struct DataFusionDriver {
     handle: Option<tokio::runtime::Handle>,
     context_init: ContextInit,
+    codec: Option<PhysicalCodec>,
 }
 
 impl DataFusionDriver {
@@ -293,7 +318,15 @@ impl DataFusionDriver {
         Self {
             handle,
             context_init,
+            codec: None,
         }
+    }
+
+    /// Register an extension codec for serializing custom physical-plan extensions
+    /// (`ExecutionPlan` nodes, UDFs, exprs) in partition descriptors (see [`PhysicalCodec`]).
+    pub fn with_codec(mut self, codec: PhysicalCodec) -> Self {
+        self.codec = Some(codec);
+        self
     }
 
     fn new_database_with_database_opts(
@@ -314,6 +347,9 @@ impl DataFusionDriver {
         Ok(DataFusionDatabase {
             handle: self.handle.clone(),
             ctx: Arc::new(ctx),
+            codec: self.codec.clone(),
+            plan_cache: Arc::new(new_plan_cache()),
+            plan_deserializations: Arc::new(AtomicU64::new(0)),
         })
     }
 }
@@ -353,6 +389,13 @@ impl Driver for DataFusionDriver {
 pub struct DataFusionDatabase {
     handle: Option<tokio::runtime::Handle>,
     ctx: Arc<SessionContext>,
+    codec: Option<PhysicalCodec>,
+    /// Shared by every connection this database opens, so all of an executor's
+    /// per-task connections reuse one deserialized plan per distinct plan bytes.
+    plan_cache: Arc<PlanCache>,
+    /// Count of plan deserializations (cache misses) across all connections.
+    /// See [`OPTION_PLAN_DESERIALIZE_COUNT`]; used for testing and evaluation.
+    plan_deserializations: Arc<AtomicU64>,
 }
 
 impl Optionable for DataFusionDatabase {
@@ -388,7 +431,12 @@ impl Optionable for DataFusionDatabase {
     }
 
     fn get_option_int(&self, key: Self::Option) -> adbc_core::error::Result<i64> {
-        Err(ErrorHelper::get_unknown_option(&key).to_adbc())
+        match key.as_ref() {
+            OPTION_PLAN_DESERIALIZE_COUNT => {
+                Ok(self.plan_deserializations.load(Ordering::Relaxed) as i64)
+            }
+            _ => Err(ErrorHelper::get_unknown_option(&key).to_adbc()),
+        }
     }
 
     fn get_option_double(&self, key: Self::Option) -> adbc_core::error::Result<f64> {
@@ -410,6 +458,9 @@ impl Database for DataFusionDatabase {
         Ok(DataFusionConnection {
             runtime: Arc::new(runtime),
             ctx: self.ctx.clone(),
+            codec: self.codec.clone(),
+            plan_cache: Arc::clone(&self.plan_cache),
+            plan_deserializations: Arc::clone(&self.plan_deserializations),
         })
     }
 
@@ -432,6 +483,9 @@ impl Database for DataFusionDatabase {
         let mut connection = DataFusionConnection {
             runtime: Arc::new(runtime),
             ctx: self.ctx.clone(),
+            codec: self.codec.clone(),
+            plan_cache: Arc::clone(&self.plan_cache),
+            plan_deserializations: Arc::clone(&self.plan_deserializations),
         };
 
         for (key, value) in opts {
@@ -442,9 +496,40 @@ impl Database for DataFusionDatabase {
     }
 }
 
+/// Cache of deserialized physical plans, keyed by descriptor plan bytes.
+///
+/// `read_partition` deserializes a given plan once and reuses it across every partition
+/// index. The cache lives on [`DataFusionDatabase`] and is shared (via `Arc`) by every
+/// connection opened from it. Since connectors open one connection per task but cache one
+/// database per executor, this collapses N per-task deserializes into one per distinct plan
+/// per executor.
+type PlanCache = parking_lot::Mutex<LruCache<Vec<u8>, Arc<dyn ExecutionPlan>>>;
+
+/// Bound on distinct cached plans, so a database serving many different queries does not
+/// accumulate plans without limit. On overflow the least-recently-used plan is evicted;
+/// already-handed-out `Arc`s stay alive until their tasks finish.
+const PLAN_CACHE_CAP: usize = 64;
+
+fn new_plan_cache() -> PlanCache {
+    parking_lot::Mutex::new(LruCache::new(
+        NonZeroUsize::new(PLAN_CACHE_CAP).expect("PLAN_CACHE_CAP is nonzero"),
+    ))
+}
+
+/// Read-only integer option: number of physical plans this database has deserialized
+/// from partition descriptors (i.e. plan-cache misses across all its connections).
+///
+/// Intended primarily for testing and evaluation: it lets a caller confirm the plan cache
+/// is working — e.g. asserting deserializations equal the number of distinct plans rather
+/// than the number of partitions read. It is not part of the ADBC option contract.
+pub const OPTION_PLAN_DESERIALIZE_COUNT: &str = "adbc.datafusion.plan_deserialize_count";
+
 pub struct DataFusionConnection {
     runtime: Arc<Runtime>,
     ctx: Arc<SessionContext>,
+    codec: Option<PhysicalCodec>,
+    plan_cache: Arc<PlanCache>,
+    plan_deserializations: Arc<AtomicU64>,
 }
 
 impl Optionable for DataFusionConnection {
@@ -545,7 +630,12 @@ impl Optionable for DataFusionConnection {
     }
 
     fn get_option_int(&self, key: Self::Option) -> adbc_core::error::Result<i64> {
-        Err(ErrorHelper::get_unknown_option(&key).to_adbc())
+        match key.as_ref() {
+            OPTION_PLAN_DESERIALIZE_COUNT => {
+                Ok(self.plan_deserializations.load(Ordering::Relaxed) as i64)
+            }
+            _ => Err(ErrorHelper::get_unknown_option(&key).to_adbc()),
+        }
     }
 
     fn get_option_double(&self, key: Self::Option) -> adbc_core::error::Result<f64> {
@@ -583,6 +673,8 @@ impl Connection for DataFusionConnection {
         Ok(DataFusionStatement {
             runtime: self.runtime.clone(),
             ctx: self.ctx.clone(),
+            codec: self.codec.clone(),
+            partition_mode: PartitionMode::default(),
             query: None,
             bound: None,
             ingest: BulkIngestState::new(),
@@ -678,11 +770,52 @@ impl Connection for DataFusionConnection {
 
     fn read_partition(
         &self,
-        _partition: impl AsRef<[u8]>,
+        partition: impl AsRef<[u8]>,
     ) -> Result<Box<dyn RecordBatchReader + Send>> {
-        Err(ErrorHelper::not_implemented()
-            .message("read_partition")
-            .to_adbc())
+        let (index, plan_bytes) = decode_descriptor(partition.as_ref())?;
+        self.runtime.block_on(async {
+            let task_ctx = self.ctx.task_ctx();
+            let default_codec = datafusion_proto::physical_plan::DefaultPhysicalExtensionCodec {};
+            let codec: &dyn datafusion_proto::physical_plan::PhysicalExtensionCodec =
+                self.codec.as_deref().unwrap_or(&default_codec);
+            // Cache the deserialized plan per distinct payload. The cache is shared across
+            // all connections from this database, so every task reading a partition of the
+            // same plan pays the proto decode once, not once per task.
+            let physical = {
+                let mut cache = self.plan_cache.lock();
+                if let Some(plan) = cache.get(plan_bytes.as_slice()) {
+                    plan.clone()
+                } else {
+                    let plan =
+                        datafusion_proto::bytes::physical_plan_from_bytes_with_extension_codec(
+                            &plan_bytes,
+                            task_ctx.as_ref(),
+                            codec,
+                        )
+                        .map_err(ErrorHelper::from_datafusion)?;
+                    self.plan_deserializations.fetch_add(1, Ordering::Relaxed);
+                    cache.put(plan_bytes.clone(), plan.clone());
+                    plan
+                }
+            };
+            let n = physical.output_partitioning().partition_count();
+            if index as usize >= n {
+                return Err(ErrorHelper::invalid_argument()
+                    .format(format_args!(
+                        "partition index {index} out of range (plan has {n} partitions)"
+                    ))
+                    .to_adbc());
+            }
+            let schema = physical.schema();
+            let stream = physical
+                .execute(index as usize, task_ctx)
+                .map_err(ErrorHelper::from_datafusion)?;
+            Ok(Box::new(DataFusionReader::from_stream(
+                self.runtime.clone(),
+                stream,
+                schema,
+            )) as Box<dyn RecordBatchReader + Send>)
+        })
     }
 }
 
@@ -714,9 +847,121 @@ impl QueryState {
     }
 }
 
+/// Partition-descriptor format version. The same driver build produces and consumes
+/// descriptors, so the byte exists only to reject a payload from a different layout.
+const DESCRIPTOR_VERSION: u8 = 1;
+
+/// Fixed descriptor header length: `version(1) + index(4)`.
+const DESCRIPTOR_HEADER_LEN: usize = 5;
+
+/// Warn when a serialized plan exceeds this size: the plan is copied into all N descriptors,
+/// so a large payload is paid N times. Operator-only plans are a few KB; this mainly catches
+/// plans that inline data.
+const PROTO_DESCRIPTOR_WARN_BYTES: usize = 8 << 20; // 8 MiB
+
+/// Build a self-contained partition descriptor:
+/// `[u8 version][u32 LE index][serialized physical plan...]`.
+///
+/// The payload is the full `datafusion-proto`-serialized physical plan; `read_partition`
+/// deserializes it and executes the given partition index.
+fn encode_descriptor(index: u32, plan_bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(DESCRIPTOR_HEADER_LEN + plan_bytes.len());
+    out.push(DESCRIPTOR_VERSION);
+    out.extend_from_slice(&index.to_le_bytes());
+    out.extend_from_slice(plan_bytes);
+    out
+}
+
+/// Inverse of [`encode_descriptor`]. Returns `(index, plan_bytes)`.
+fn decode_descriptor(bytes: &[u8]) -> adbc_core::error::Result<(u32, Vec<u8>)> {
+    if bytes.len() < DESCRIPTOR_HEADER_LEN {
+        return Err(ErrorHelper::invalid_argument()
+            .message("short partition descriptor")
+            .to_adbc());
+    }
+    let version = bytes[0];
+    if version != DESCRIPTOR_VERSION {
+        return Err(ErrorHelper::invalid_argument()
+            .format(format_args!("unsupported descriptor version {version}"))
+            .to_adbc());
+    }
+    let index = u32::from_le_bytes(bytes[1..5].try_into().unwrap());
+    let plan_bytes = bytes[DESCRIPTOR_HEADER_LEN..].to_vec();
+    Ok((index, plan_bytes))
+}
+
+/// Statement option selecting the `execute_partitions` strategy. String value, one of
+/// `auto`, `single`, or `multi` (see [`PartitionMode`]).
+const OPTION_PARTITION_MODE: &str = "datafusion.partition_mode";
+
+/// How `execute_partitions` splits a query into descriptors.
+///
+/// Producing one output partition of a plan that *shuffles* (a hash repartition for joins
+/// and grouped aggregates, or a sort) requires reading every input partition. Executing
+/// each such partition independently — the point of partitioned execution — therefore
+/// re-runs the whole pre-shuffle pipeline once per partition and is usually slower than a
+/// single execution. This mode controls how that case is handled.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum PartitionMode {
+    /// One descriptor per natural output partition; warn when the plan shuffles. Preserves
+    /// the partition count the caller's plan produced even when that is slower.
+    Multi,
+    /// Collapse to a single coalesced partition when the plan shuffles, otherwise one
+    /// descriptor per natural output partition. Default — never silently re-runs a shuffle
+    /// once per partition.
+    #[default]
+    Auto,
+    /// Always collapse to a single coalesced partition. This yields the same one-partition
+    /// result as calling [`Statement::execute`] directly, just delivered through the
+    /// partition API; prefer `execute` unless the caller is built around
+    /// `execute_partitions`/`read_partition`.
+    Single,
+}
+
+impl PartitionMode {
+    fn from_option(value: &str) -> adbc_core::error::Result<Self> {
+        match value {
+            "multi" => Ok(Self::Multi),
+            "auto" => Ok(Self::Auto),
+            "single" => Ok(Self::Single),
+            other => Err(ErrorHelper::invalid_argument()
+                .format(format_args!(
+                    "unknown {OPTION_PARTITION_MODE} '{other}' (expected auto, single, or multi)"
+                ))
+                .to_adbc()),
+        }
+    }
+
+    fn as_option(self) -> &'static str {
+        match self {
+            Self::Multi => "multi",
+            Self::Auto => "auto",
+            Self::Single => "single",
+        }
+    }
+}
+
+/// True if executing a single output partition of `plan` would re-read all input partitions,
+/// i.e. the plan contains a repartition or sort shuffle. Such plans are poor candidates for
+/// distributed partitioned execution (each partition re-runs the pre-shuffle pipeline).
+fn plan_has_shuffle(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    use datafusion::physical_plan::repartition::RepartitionExec;
+    use datafusion::physical_plan::sorts::sort::SortExec;
+    use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
+
+    let node = plan.as_any();
+    if node.is::<RepartitionExec>() || node.is::<SortExec>() || node.is::<SortPreservingMergeExec>()
+    {
+        return true;
+    }
+    plan.children().into_iter().any(plan_has_shuffle)
+}
+
 pub struct DataFusionStatement {
     runtime: Arc<Runtime>,
     ctx: Arc<SessionContext>,
+    codec: Option<PhysicalCodec>,
+    partition_mode: PartitionMode,
     query: Option<QueryState>,
     bound: Option<Box<dyn RecordBatchReader + Send>>,
     ingest: BulkIngestState<ErrorHelper>,
@@ -744,6 +989,15 @@ impl Optionable for DataFusionStatement {
                     .message("temporary tables are not supported")
                     .to_adbc()),
             },
+            OPTION_PARTITION_MODE => match value {
+                OptionValue::String(v) => {
+                    self.partition_mode = PartitionMode::from_option(&v)?;
+                    Ok(())
+                }
+                _ => Err(ErrorHelper::set_invalid_option(&key, &value)
+                    .message("must be a string")
+                    .to_adbc()),
+            },
             _ => Err(ErrorHelper::set_unknown_option(&key).to_adbc()),
         }
     }
@@ -756,6 +1010,7 @@ impl Optionable for DataFusionStatement {
                     .format(format_args!("{key:?} has not been set"))
                     .to_adbc()),
             },
+            OPTION_PARTITION_MODE => Ok(self.partition_mode.as_option().to_string()),
             _ => Err(ErrorHelper::get_unknown_option(&key).to_adbc()),
         }
     }
@@ -969,7 +1224,7 @@ impl Statement for DataFusionStatement {
                 Some(q) => q.execute(&self.ctx).await?,
                 None => {
                     return Err(ErrorHelper::invalid_state()
-                        .message("no query or Substrait plan has been set")
+                        .message("no query has been set")
                         .to_adbc());
                 }
             };
@@ -995,7 +1250,7 @@ impl Statement for DataFusionStatement {
                 Some(q) => q.execute(&self.ctx).await?,
                 None => {
                     return Err(ErrorHelper::invalid_state()
-                        .message("no query or Substrait plan has been set")
+                        .message("no query has been set")
                         .to_adbc());
                 }
             };
@@ -1031,9 +1286,70 @@ impl Statement for DataFusionStatement {
     }
 
     fn execute_partitions(&mut self) -> adbc_core::error::Result<adbc_core::PartitionedResult> {
-        Err(ErrorHelper::not_implemented()
-            .message("execute_partitions")
-            .to_adbc())
+        let query = self.query.as_ref().ok_or_else(|| {
+            ErrorHelper::invalid_state()
+                .message("no query has been set")
+                .to_adbc()
+        })?;
+        self.runtime.block_on(async {
+            // query.execute also registers the plan's object stores, required before execution.
+            let df = query.execute(&self.ctx).await?;
+            let schema = df.schema().as_arrow().clone();
+            let physical = df
+                .create_physical_plan()
+                .await
+                .map_err(ErrorHelper::from_datafusion)?;
+            let natural_n = physical.output_partitioning().partition_count() as u32;
+
+            // A plan that shuffles re-runs its pre-shuffle pipeline once per partition when
+            // executed partition-by-partition. Depending on partition_mode, collapse such a
+            // plan to a single coalesced partition, or keep the natural partitions and warn.
+            let shuffle = plan_has_shuffle(&physical);
+            let collapse = matches!(self.partition_mode, PartitionMode::Single)
+                || (matches!(self.partition_mode, PartitionMode::Auto) && shuffle);
+
+            let physical = if collapse && natural_n > 1 {
+                Arc::new(CoalescePartitionsExec::new(physical)) as Arc<dyn ExecutionPlan>
+            } else {
+                physical
+            };
+            let n = physical.output_partitioning().partition_count() as u32;
+
+            if shuffle && !collapse && n > 1 {
+                log::warn!(
+                    "execute_partitions: plan contains a shuffle (repartition/sort), so each of \
+                     the {n} partitions re-runs the pre-shuffle pipeline; this is often slower \
+                     than a single execution. Set {OPTION_PARTITION_MODE}=auto or =single to \
+                     coalesce into one partition."
+                );
+            }
+
+            // Serialize the physical plan into each descriptor. The default codec covers
+            // built-in nodes, a registered codec also covers custom ones; a node neither
+            // can encode fails the query.
+            let default_codec = datafusion_proto::physical_plan::DefaultPhysicalExtensionCodec {};
+            let codec: &dyn datafusion_proto::physical_plan::PhysicalExtensionCodec =
+                self.codec.as_deref().unwrap_or(&default_codec);
+            let plan_bytes = datafusion_proto::bytes::physical_plan_to_bytes_with_extension_codec(
+                physical, codec,
+            )
+            .map_err(ErrorHelper::from_datafusion)?;
+            if plan_bytes.len() > PROTO_DESCRIPTOR_WARN_BYTES {
+                // The full plan is copied into each of the N descriptors; warn when large.
+                log::warn!(
+                    "partition descriptor carries a {}-byte plan across {n} partitions",
+                    plan_bytes.len(),
+                );
+            }
+            let partitions = (0..n)
+                .map(|i| encode_descriptor(i, &plan_bytes))
+                .collect::<Vec<_>>();
+            Ok(adbc_core::PartitionedResult {
+                partitions,
+                schema,
+                rows_affected: -1,
+            })
+        })
     }
 
     fn get_parameter_schema(&self) -> adbc_core::error::Result<arrow_schema::Schema> {
@@ -1148,3 +1464,29 @@ impl Statement for DataFusionStatement {
 
 #[cfg(feature = "ffi")]
 adbc_ffi::export_driver!(AdbcDriverDatafusionInit, DataFusionDriver);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn descriptor_round_trip() {
+        let plan_bytes = vec![9u8, 8, 7, 6];
+        let bytes = encode_descriptor(2, &plan_bytes);
+        let (index, payload) = decode_descriptor(&bytes).unwrap();
+        assert_eq!(index, 2);
+        assert_eq!(payload, plan_bytes);
+    }
+
+    #[test]
+    fn decode_rejects_short_descriptor() {
+        assert!(decode_descriptor(&[DESCRIPTOR_VERSION; DESCRIPTOR_HEADER_LEN - 1]).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_unknown_version() {
+        let mut bytes = encode_descriptor(0, b"x");
+        bytes[0] = DESCRIPTOR_VERSION + 1;
+        assert!(decode_descriptor(&bytes).is_err());
+    }
+}

@@ -422,3 +422,251 @@ async fn test_running_in_async() {
     assert_eq!(batch.num_rows(), 3);
     assert_eq!(batch.num_columns(), 2);
 }
+
+/// A single-partition keyed table; a `GROUP BY k` over it hash-repartitions to
+/// `target_partitions`, giving a plan whose output partition count is driven by config.
+fn keyed_table(n_keys: i32) -> datafusion::error::Result<MemTable> {
+    let schema: SchemaRef = Arc::new(Schema::new(vec![
+        Field::new("k", DataType::Int32, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let keys: ArrayRef = Arc::new(Int32Array::from((0..n_keys).collect::<Vec<_>>()));
+    let vals: ArrayRef = Arc::new(Int32Array::from(
+        (0..n_keys).map(|i| i * 10).collect::<Vec<_>>(),
+    ));
+    let batch = RecordBatch::try_new(schema.clone(), vec![keys, vals])?;
+    MemTable::try_new(schema, vec![vec![batch]])
+}
+
+/// A connection whose session pins `target_partitions` to `n` and has table `t` registered.
+fn connection_with_target_partitions(n: usize) -> DataFusionConnection {
+    let init: ContextInit = Arc::new(move |ctx, _opts| {
+        let config = SessionConfig::new()
+            .with_information_schema(true)
+            .with_target_partitions(n);
+        *ctx = SessionContext::new_with_config(config);
+        ctx.register_table("t", Arc::new(keyed_table(8)?))?;
+        Ok(())
+    });
+    let mut driver = DataFusionDriver::new_with_context_init(None, init);
+    let database = driver.new_database().unwrap();
+    database.new_connection().unwrap()
+}
+
+const GROUP_BY_QUERY: &str = "SELECT k, sum(v) AS s FROM t GROUP BY k";
+
+/// Collect the `k` column of every row produced by reading the given descriptor.
+fn read_partition_keys(connection: &DataFusionConnection, descriptor: &[u8]) -> Vec<i32> {
+    let reader = connection.read_partition(descriptor).unwrap();
+    let mut keys = Vec::new();
+    for batch in reader {
+        let batch = batch.unwrap();
+        let col = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        for i in 0..col.len() {
+            keys.push(col.value(i));
+        }
+    }
+    keys
+}
+
+#[test]
+fn test_execute_partitions_returns_one_descriptor_per_output_partition() {
+    let mut connection = connection_with_target_partitions(4);
+    let mut statement = connection.new_statement().unwrap();
+    statement.set_sql_query(GROUP_BY_QUERY).unwrap();
+    // GROUP_BY_QUERY shuffles, so the default `auto` mode would collapse it; force `multi`
+    // to exercise one descriptor per natural partition.
+    statement
+        .set_option(
+            OptionStatement::Other(PARTITION_MODE.to_string()),
+            OptionValue::String("multi".to_string()),
+        )
+        .unwrap();
+
+    let result = statement.execute_partitions().unwrap();
+
+    // Hash-repartitioned aggregate => one ADBC partition per target partition (4).
+    assert_eq!(
+        result.partitions.len(),
+        4,
+        "expected one descriptor per target partition, got {}",
+        result.partitions.len()
+    );
+    assert_eq!(result.rows_affected, -1);
+
+    // The union of all partitions reproduces every key exactly once.
+    let mut keys = Vec::new();
+    for descriptor in &result.partitions {
+        keys.extend(read_partition_keys(&connection, descriptor));
+    }
+    keys.sort();
+    assert_eq!(keys, (0..8).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_read_partition_executes_serialized_plan() {
+    // Plan with target_partitions = 4.
+    let mut planner = connection_with_target_partitions(4);
+    let mut statement = planner.new_statement().unwrap();
+    statement.set_sql_query(GROUP_BY_QUERY).unwrap();
+    statement
+        .set_option(
+            OptionStatement::Other(PARTITION_MODE.to_string()),
+            OptionValue::String("multi".to_string()),
+        )
+        .unwrap();
+    let result = statement.execute_partitions().unwrap();
+    assert!(result.partitions.len() > 1);
+
+    // Execute on a connection whose default target_partitions differs (1). The descriptor
+    // carries the already-built physical plan, so its partitioning is fixed regardless of the
+    // executor's config — partition `i` stays meaningful and in range.
+    let executor = connection_with_target_partitions(1);
+    let mut keys = Vec::new();
+    for descriptor in &result.partitions {
+        keys.extend(read_partition_keys(&executor, descriptor));
+    }
+    keys.sort();
+    assert_eq!(keys, (0..8).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_execute_partitions_prepared() {
+    // The proto path serializes the built physical plan regardless of source, so a prepared
+    // statement partitions like any other query.
+    let mut connection = connection_with_target_partitions(4);
+    let mut statement = connection.new_statement().unwrap();
+    statement.set_sql_query(GROUP_BY_QUERY).unwrap();
+    statement
+        .set_option(
+            OptionStatement::Other(PARTITION_MODE.to_string()),
+            OptionValue::String("multi".to_string()),
+        )
+        .unwrap();
+    statement.prepare().unwrap();
+
+    let result = statement.execute_partitions().unwrap();
+    assert!(result.partitions.len() > 1);
+
+    let mut keys = Vec::new();
+    for descriptor in &result.partitions {
+        keys.extend(read_partition_keys(&connection, descriptor));
+    }
+    keys.sort();
+    assert_eq!(keys, (0..8).collect::<Vec<_>>());
+}
+
+const PARTITION_MODE: &str = "datafusion.partition_mode";
+
+/// A connection with a two-partition in-memory table `p` (keys 0..4 and 4..8) and no
+/// repartitioning forced, so `SELECT * FROM p` is a shuffle-free two-partition scan.
+fn connection_with_two_partition_table() -> DataFusionConnection {
+    let init: ContextInit = Arc::new(|ctx, _opts| {
+        let schema: SchemaRef = Arc::new(Schema::new(vec![
+            Field::new("k", DataType::Int32, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let part = |lo: i32, hi: i32| {
+            let keys: ArrayRef = Arc::new(Int32Array::from((lo..hi).collect::<Vec<_>>()));
+            let vals: ArrayRef = Arc::new(Int32Array::from(
+                (lo..hi).map(|i| i * 10).collect::<Vec<_>>(),
+            ));
+            RecordBatch::try_new(schema.clone(), vec![keys, vals]).unwrap()
+        };
+        // Two batch groups => two table partitions.
+        let table = MemTable::try_new(schema.clone(), vec![vec![part(0, 4)], vec![part(4, 8)]])?;
+        ctx.register_table("p", Arc::new(table))?;
+        Ok(())
+    });
+    let mut driver = DataFusionDriver::new_with_context_init(None, init);
+    let database = driver.new_database().unwrap();
+    database.new_connection().unwrap()
+}
+
+#[test]
+fn test_partition_mode_single_collapses_to_one() {
+    // GROUP_BY_QUERY hash-repartitions to 4 partitions; single mode must coalesce to one.
+    let mut connection = connection_with_target_partitions(4);
+    let mut statement = connection.new_statement().unwrap();
+    statement.set_sql_query(GROUP_BY_QUERY).unwrap();
+    statement
+        .set_option(
+            OptionStatement::Other(PARTITION_MODE.to_string()),
+            OptionValue::String("single".to_string()),
+        )
+        .unwrap();
+
+    let result = statement.execute_partitions().unwrap();
+    assert_eq!(result.partitions.len(), 1, "single mode => one descriptor");
+
+    // The lone descriptor reproduces every key — the coalesced plan runs the whole query.
+    let mut keys = read_partition_keys(&connection, &result.partitions[0]);
+    keys.sort();
+    assert_eq!(keys, (0..8).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_partition_mode_auto_collapses_shuffle() {
+    // Aggregate has a shuffle => auto coalesces to one partition.
+    let mut connection = connection_with_target_partitions(4);
+    let mut statement = connection.new_statement().unwrap();
+    statement.set_sql_query(GROUP_BY_QUERY).unwrap();
+    statement
+        .set_option(
+            OptionStatement::Other(PARTITION_MODE.to_string()),
+            OptionValue::String("auto".to_string()),
+        )
+        .unwrap();
+
+    let result = statement.execute_partitions().unwrap();
+    assert_eq!(
+        result.partitions.len(),
+        1,
+        "auto mode collapses a shuffling plan to one partition"
+    );
+}
+
+#[test]
+fn test_partition_mode_auto_keeps_shuffle_free_partitions() {
+    // A plain two-partition scan has no shuffle => auto keeps the natural partitions.
+    let mut connection = connection_with_two_partition_table();
+    let mut statement = connection.new_statement().unwrap();
+    statement.set_sql_query("SELECT k, v FROM p").unwrap();
+    statement
+        .set_option(
+            OptionStatement::Other(PARTITION_MODE.to_string()),
+            OptionValue::String("auto".to_string()),
+        )
+        .unwrap();
+
+    let result = statement.execute_partitions().unwrap();
+    assert_eq!(
+        result.partitions.len(),
+        2,
+        "auto keeps natural partitions when the plan does not shuffle"
+    );
+
+    let mut keys = Vec::new();
+    for descriptor in &result.partitions {
+        keys.extend(read_partition_keys(&connection, descriptor));
+    }
+    keys.sort();
+    assert_eq!(keys, (0..8).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_partition_mode_rejects_unknown_value() {
+    let mut connection = connection_with_target_partitions(4);
+    let mut statement = connection.new_statement().unwrap();
+    let err = statement
+        .set_option(
+            OptionStatement::Other(PARTITION_MODE.to_string()),
+            OptionValue::String("nonsense".to_string()),
+        )
+        .unwrap_err();
+    assert_eq!(err.status, adbc_core::error::Status::InvalidArguments);
+}
