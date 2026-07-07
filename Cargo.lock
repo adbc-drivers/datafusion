@@ -2079,7 +2079,7 @@ dependencies = [
 [[package]]
 name = "driverbase"
 version = "0.1.0"
-source = "git+https://github.com/adbc-drivers/driverbase-rs.git#483f28e8720d1d41ca3e65c0d4a8569f47a17bdb"
+source = "git+https://github.com/adbc-drivers/driverbase-rs.git#18a5e1483001ee3555906d51077b73fc9e3460ab"
 dependencies = [
  "adbc_core",
  "arrow-array",
