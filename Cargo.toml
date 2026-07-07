@@ -44,7 +44,7 @@ driverbase = { git = "https://github.com/adbc-drivers/driverbase-rs.git" }
 futures = "0.3.32"
 log = "0.4"
 lru = "0.18"
-object_store = { version = "0.13", features = ["aws", "gcp", "http"] }
+object_store = { version = "0.14", features = ["aws", "gcp", "http"] }
 parking_lot = "0.12"
 prost = "0.14.3"
 regex = "1"
