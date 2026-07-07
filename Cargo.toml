@@ -24,7 +24,7 @@
 name = "adbc-driver-datafusion"
 description = "ADBC driver for Apache DataFusion"
 license = "Apache-2.0"
-version = "0.25.0"
+version = "0.26.0"
 edition = "2024"
 
 [dependencies]
