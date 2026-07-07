@@ -16,7 +16,7 @@ version: 2
 updates:
   - package-ecosystem: "cargo"
     commit-message:
-      prefix: "chore(rust): "
+      prefix: "chore: "
     directory: "/"
     groups:
       arrow-adbc:
