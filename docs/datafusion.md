@@ -114,6 +114,8 @@ It is possible to customize the embedded DataFusion by depending on this crate, 
 
 To see documentation for previous versions of this driver, see the following:
 
+- [v0.26.0](./v0.26.0.md)
+- [v0.25.0](./v0.25.0.md)
 - [v0.24.1](./v0.24.1.md)
 
 [datafusion]: https://datafusion.apache.org/
