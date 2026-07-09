@@ -39,7 +39,7 @@ aws-config = "1.8"
 aws-credential-types = "1.2"
 datafusion = { version = "53", default-features = false, features = ["avro", "compression", "crypto_expressions", "datetime_expressions", "nested_expressions", "parquet", "recursive_protection", "regex_expressions", "sql", "unicode_expressions"] }
 datafusion-proto = { version = "53", default-features = false }
-datafusion-substrait = { version = "53", default-features = false }
+datafusion-substrait = { version = "54", default-features = false }
 driverbase = { git = "https://github.com/adbc-drivers/driverbase-rs.git" }
 futures = "0.3.32"
 log = "0.4"
