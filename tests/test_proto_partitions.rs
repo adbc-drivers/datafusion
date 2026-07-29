@@ -19,7 +19,6 @@
 //! impossible and a passing test proves the deserialize path. Also covers the hard error
 //! when a custom node cannot be encoded (no re-plan fallback).
 
-use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -91,10 +90,6 @@ impl ExecutionPlan for CustomExec {
         "CustomExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
     }
@@ -140,10 +135,6 @@ struct CustomProvider {
 
 #[async_trait]
 impl TableProvider for CustomProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         schema()
     }
@@ -190,7 +181,6 @@ impl PhysicalExtensionCodec for CustomCodec {
 
     fn try_encode(&self, node: Arc<dyn ExecutionPlan>, buf: &mut Vec<u8>) -> DFResult<()> {
         let exec = node
-            .as_any()
             .downcast_ref::<CustomExec>()
             .ok_or_else(|| DataFusionError::Internal("not a CustomExec".into()))?;
         buf.extend_from_slice(&(exec.partitions as u64).to_le_bytes());

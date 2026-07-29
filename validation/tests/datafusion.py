@@ -23,8 +23,8 @@ class DataFusionQuirks(model.DriverQuirks):
     driver = "adbc_driver_datafusion"
     driver_name = "ADBC Driver Foundry Driver for Apache DataFusion"
     vendor_name = "Apache DataFusion"
-    vendor_version = "53.1.0"
-    short_version = "53"
+    vendor_version = "54.1.0"
+    short_version = "54"
     features = model.DriverFeatures(
         statement_bind=True,
         statement_get_parameter_schema=True,
@@ -88,6 +88,4 @@ class DataFusionQuirks(model.DriverQuirks):
 
 @functools.cache
 def get_quirks(version: str) -> model.DriverQuirks:
-    if version in ("53", "latest"):
-        return DataFusionQuirks()
-    raise ValueError(f"unsupported version: {version}")
+    return DataFusionQuirks()

@@ -92,9 +92,6 @@ impl ErrorHelper {
             datafusion::error::DataFusionError::ArrowError(arrow_error, _) => {
                 Self::from_arrow(*arrow_error)
             }
-            datafusion::error::DataFusionError::AvroError(error) => {
-                Self::io().message(error.to_string())
-            }
             datafusion::error::DataFusionError::ParquetError(parquet_error) => {
                 Self::io().message(parquet_error.to_string())
             }
@@ -949,8 +946,9 @@ fn plan_has_shuffle(plan: &Arc<dyn ExecutionPlan>) -> bool {
     use datafusion::physical_plan::sorts::sort::SortExec;
     use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
 
-    let node = plan.as_any();
-    if node.is::<RepartitionExec>() || node.is::<SortExec>() || node.is::<SortPreservingMergeExec>()
+    if plan.downcast_ref::<RepartitionExec>().is_some()
+        || plan.downcast_ref::<SortExec>().is_some()
+        || plan.downcast_ref::<SortPreservingMergeExec>().is_some()
     {
         return true;
     }
