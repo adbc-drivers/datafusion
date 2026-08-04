@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use arrow_array::{RecordBatch, RecordBatchReader};
-use arrow_schema::{ArrowError, SchemaRef};
+use arrow_schema::{ArrowError, DataType, SchemaRef};
+use datafusion::arrow::compute::CastOptions;
 use datafusion::common::ScalarValue;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::prelude::*;
@@ -26,21 +27,61 @@ use crate::{ErrorHelper, Runtime};
 pub fn row_to_scalar_values(
     batch: &RecordBatch,
     row_index: usize,
+    parameters: &BindParameters,
 ) -> adbc_core::error::Result<Vec<ScalarValue>> {
     let mut values = Vec::with_capacity(batch.num_columns());
     for col_index in 0..batch.num_columns() {
         let array = batch.column(col_index);
         let scalar =
             ScalarValue::try_from_array(array, row_index).map_err(ErrorHelper::from_datafusion)?;
-        values.push(scalar);
+        let parameter_type = parameters.get(col_index);
+        if let Some(parameter_type) = parameter_type
+            && scalar.data_type() != *parameter_type
+        {
+            let options = CastOptions {
+                safe: false,
+                ..Default::default()
+            };
+            values.push(
+                scalar
+                    .cast_to_with_options(parameter_type, &options)
+                    .map_err(|e| {
+                        ErrorHelper::from_datafusion(e)
+                            .context("cast bound parameter to inferred type")
+                            .to_adbc()
+                    })?,
+            );
+        } else {
+            values.push(scalar);
+        }
     }
     Ok(values)
+}
+
+pub struct BindParameters {
+    types: HashMap<String, Option<DataType>>,
+}
+
+impl BindParameters {
+    pub fn from_plan(plan: &LogicalPlan) -> adbc_core::error::Result<Self> {
+        let types = plan
+            .get_parameter_types()
+            .map_err(ErrorHelper::from_datafusion)?;
+        Ok(Self { types })
+    }
+
+    fn get(&self, position: usize) -> Option<&DataType> {
+        self.types
+            .get(&format!("${}", position + 1))
+            .and_then(Option::as_ref)
+    }
 }
 
 pub struct BindReader {
     runtime: Arc<Runtime>,
     ctx: Arc<SessionContext>,
     plan: LogicalPlan,
+    parameters: BindParameters,
     bound: Box<dyn RecordBatchReader + Send>,
     current_batch: Option<RecordBatch>,
     next_row: usize,
@@ -53,6 +94,7 @@ impl BindReader {
         runtime: Arc<Runtime>,
         ctx: Arc<SessionContext>,
         plan: LogicalPlan,
+        parameters: BindParameters,
         bound: Box<dyn RecordBatchReader + Send>,
     ) -> Self {
         let schema: SchemaRef = plan.schema().as_arrow().clone().into();
@@ -60,6 +102,7 @@ impl BindReader {
             runtime,
             ctx,
             plan,
+            parameters,
             bound,
             current_batch: None,
             next_row: 0,
@@ -100,7 +143,7 @@ impl BindReader {
                 }
             };
 
-            let params = match row_to_scalar_values(batch, self.next_row) {
+            let params = match row_to_scalar_values(batch, self.next_row, &self.parameters) {
                 Ok(p) => p,
                 Err(e) => {
                     return Some(Err(ArrowError::ExternalError(Box::new(e))));
@@ -147,5 +190,27 @@ impl Iterator for BindReader {
 impl RecordBatchReader for BindReader {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bind_parameters_look_up_positional_placeholders() {
+        let parameters = BindParameters {
+            types: HashMap::from([
+                ("$named".to_string(), Some(DataType::Utf8)),
+                ("$1".to_string(), Some(DataType::Int32)),
+                ("$3".to_string(), None),
+                ("$4".to_string(), Some(DataType::Boolean)),
+            ]),
+        };
+
+        assert_eq!(parameters.get(0), Some(&DataType::Int32));
+        assert_eq!(parameters.get(1), None);
+        assert_eq!(parameters.get(2), None);
+        assert_eq!(parameters.get(3), Some(&DataType::Boolean));
     }
 }

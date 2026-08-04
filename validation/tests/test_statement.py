@@ -26,11 +26,6 @@ def pytest_generate_tests(metafunc) -> None:
 
 
 class TestStatement(statement_tests.TestStatement):
-    # TODO: Coerce bound parameters to the prepared statement's inferred types.
-    @pytest.mark.xfail(reason="Driver does not coerce bound parameter types")
-    def test_parameter_null_typed(self, driver, conn, sample_table) -> None:
-        super().test_parameter_null_typed(driver, conn, sample_table)
-
     @pytest.mark.xfail(
         reason="DataFusion lightweight updates require special table settings"
     )

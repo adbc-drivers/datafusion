@@ -1043,10 +1043,12 @@ impl DataFusionStatement {
         reader: Box<dyn RecordBatchReader + Send>,
     ) -> Result<Box<dyn RecordBatchReader + Send>> {
         let plan = self.ensure_prepared()?;
+        let parameters = bind::BindParameters::from_plan(&plan)?;
         Ok(Box::new(bind::BindReader::new(
             self.runtime.clone(),
             self.ctx.clone(),
             plan,
+            parameters,
             reader,
         )))
     }
@@ -1056,11 +1058,12 @@ impl DataFusionStatement {
         reader: Box<dyn RecordBatchReader + Send>,
     ) -> adbc_core::error::Result<Option<i64>> {
         let plan = self.ensure_prepared()?;
+        let parameters = bind::BindParameters::from_plan(&plan)?;
         self.runtime.block_on(async {
             for batch in reader {
                 let batch = batch.map_err(ErrorHelper::from_arrow)?;
                 for row_idx in 0..batch.num_rows() {
-                    let params = bind::row_to_scalar_values(&batch, row_idx)?;
+                    let params = bind::row_to_scalar_values(&batch, row_idx, &parameters)?;
 
                     let plan_with_params = plan
                         .clone()
