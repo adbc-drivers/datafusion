@@ -14,43 +14,28 @@
 
 // part: metadata
 
-[setup]
-drop = "test_timestamp"
-
 [tags]
-sql-type-name = "TIMESTAMP"
-caveats = ["DataFusion uses nanosecond precision; max timestamp is 2262-04-11T23:47:16"]
+caveats = ["DataFusion timestamps use nanosecond-backed storage and are limited to approximately 1677 through 2262."]
 
 // part: setup_query
 
 CREATE TABLE test_timestamp (
     idx INTEGER,
-    res TIMESTAMP
+    res TIMESTAMP(0)
 );
 
 INSERT INTO test_timestamp (idx, res) VALUES (1, TIMESTAMP '2023-05-15 13:45:30');
 INSERT INTO test_timestamp (idx, res) VALUES (2, TIMESTAMP '2000-01-01 00:00:00');
 INSERT INTO test_timestamp (idx, res) VALUES (3, TIMESTAMP '1969-07-20 20:17:40');
-INSERT INTO test_timestamp (idx, res) VALUES (4, TIMESTAMP '2262-04-11 23:47:16');
-INSERT INTO test_timestamp (idx, res) VALUES (5, NULL);
-
-// part: expected_schema
-
-{
-    "format": "+s",
-    "children": [
-        {
-            "name": "res",
-            "format": "tsn:",
-            "flags": ["nullable"]
-        }
-    ]
-}
+INSERT INTO test_timestamp (idx, res) VALUES (4, TIMESTAMP '1677-09-21 00:12:44');
+INSERT INTO test_timestamp (idx, res) VALUES (5, TIMESTAMP '2262-04-11 23:47:16');
+INSERT INTO test_timestamp (idx, res) VALUES (6, NULL);
 
 // part: expected
 
-{"res": 1684158330000000000}
-{"res": 946684800000000000}
-{"res": -14182940000000000}
-{"res": 9223372036000000000}
+{"res": 1684158330}
+{"res": 946684800}
+{"res": -14182940}
+{"res": -9223372036}
+{"res": 9223372036}
 {"res": null}

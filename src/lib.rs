@@ -1090,6 +1090,28 @@ impl DataFusionStatement {
         }
     }
 
+    async fn ensure_ingest_schema_matches(
+        &self,
+        table_ref: &TableReference,
+        schema: &SchemaRef,
+    ) -> adbc_core::error::Result<()> {
+        let table_schema = self
+            .ctx
+            .table_provider(table_ref.clone())
+            .await
+            .map_err(ErrorHelper::from_datafusion)?
+            .schema();
+        if schema.as_ref() != table_schema.as_ref() {
+            return Err(ErrorHelper::already_exists()
+                .format(format_args!(
+                    "table '{}' exists with a different schema",
+                    self.ingest.table.as_deref().unwrap_or("")
+                ))
+                .to_adbc());
+        }
+        Ok(())
+    }
+
     fn execute_bulk_ingest(&mut self) -> adbc_core::error::Result<Option<i64>> {
         let reader = self.bound.take().ok_or_else(|| {
             ErrorHelper::invalid_state()
@@ -1138,6 +1160,8 @@ impl DataFusionStatement {
                             ))
                             .to_adbc());
                     }
+                    self.ensure_ingest_schema_matches(&table_ref, &schema)
+                        .await?;
                     let df = self
                         .ctx
                         .read_batches(batches)
@@ -1171,6 +1195,8 @@ impl DataFusionStatement {
                         .table_exist(table_ref.clone())
                         .map_err(ErrorHelper::from_datafusion)?
                     {
+                        self.ensure_ingest_schema_matches(&table_ref, &schema)
+                            .await?;
                         let df = self
                             .ctx
                             .read_batches(batches)
