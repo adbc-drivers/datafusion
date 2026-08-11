@@ -63,7 +63,7 @@ jobs:
           # https://github.com/actions/runner-images/issues/2840
           sudo rm -rf "$AGENT_TOOLSDIRECTORY"
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -74,7 +74,7 @@ jobs:
           cache: false
           components: "clippy"
 
-      - uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f  # v0.10.0
+      - uses: prefix-dev/setup-pixi@f00437f565399d418b0acc85936d12c1fb668347  # v0.10.1
         with:
           pixi-version: v0.72.0
           run-install: false
@@ -134,11 +134,15 @@ jobs:
             ./ci/scripts/pre-test.sh ${{ matrix.platform }} ${{ matrix.arch }} "test-service"
           fi
 
+          # if pre-test.sh needs to override env vars, it can generate this file
+          set -a
+          if [[ -f .env.override ]]; then
+            source .env.override
+          fi
+          set +a
+
           cargo test
 
-          if [[ -f ci/scripts/post-test.sh ]]; then
-            ./ci/scripts/post-test.sh
-          fi
 
       - name: clippy
         working-directory: .
@@ -150,13 +154,16 @@ jobs:
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: true
+      max-parallel: 4
       matrix:
         include:
           # I think we only need to test one platform, but we can change that later
-          - { platform: linux, arch: amd64, runner: ubuntu-latest, service_name: "test-service", vendor_version: "latest", environment: null, azure: false }
+          - { platform: linux, arch: amd64, runner: ubuntu-latest, service_name: "test-service", vendor_version: "latest", environment: null, aws: false, azure: false, gcloud: false }
     environment: ${{ matrix.environment }}
     permissions:
       contents: read
+    env:
+      FOUNDRY_GH_ENVIRONMENT: ${{ matrix.environment || '' }}
     steps:
       - name: free up disk space
         if: runner.os != 'Windows'
@@ -165,7 +172,7 @@ jobs:
           # https://github.com/actions/runner-images/issues/2840
           sudo rm -rf "$AGENT_TOOLSDIRECTORY"
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -176,7 +183,7 @@ jobs:
           cache: false
           components: "clippy"
 
-      - uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f  # v0.10.0
+      - uses: prefix-dev/setup-pixi@f00437f565399d418b0acc85936d12c1fb668347  # v0.10.1
         with:
           pixi-version: v0.72.0
           run-install: false
@@ -206,7 +213,7 @@ jobs:
             source .env.test
           fi
           set +a
-          pixi run adbc-make build DEBUG=true VERBOSE=true DRIVER=datafusion IMPL_LANG=rust
+          pixi run adbc-make build DEBUG=true VERBOSE=true
       - name: Start Test Dependencies
         # Can't use Docker on macOS AArch64 runners, and Windows containers
         # work but often the container doesn't support Windows
@@ -243,6 +250,13 @@ jobs:
             ./ci/scripts/pre-test.sh ${{ matrix.platform }} ${{ matrix.arch }} ${{ matrix.service_name }}
           fi
 
+          # if pre-test.sh needs to override env vars, it can generate this file
+          set -a
+          if [[ -f .env.override ]]; then
+            source .env.override
+          fi
+          set +a
+
           docker ps
           if [[ -n "${{ matrix.vendor_version }}" ]]; then
             pixi run validate --vendor-version "${{ matrix.vendor_version }}"
@@ -250,11 +264,8 @@ jobs:
             pixi run validate
           fi
 
-          if [[ -f ci/scripts/post-test.sh ]]; then
-            ./ci/scripts/post-test.sh
-          fi
-
           cp validation-report.xml validation-report-${{ matrix.vendor_version }}.xml
+
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
@@ -290,7 +301,7 @@ jobs:
       packages: read
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -301,7 +312,7 @@ jobs:
           cache: false
           components: "clippy"
 
-      - uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f  # v0.10.0
+      - uses: prefix-dev/setup-pixi@f00437f565399d418b0acc85936d12c1fb668347  # v0.10.1
         with:
           pixi-version: v0.72.0
           run-install: false
@@ -335,7 +346,11 @@ jobs:
             source .env.release
           fi
           set +a
-          pixi run adbc-make check CI=true VERBOSE=true DRIVER=datafusion IMPL_LANG=rust  RELEASE=true
+          pixi run adbc-make check CI=true VERBOSE=true  RELEASE=true
+          if [[ -f ci/scripts/post-build.sh ]]; then
+            ./ci/scripts/post-build.sh release ${{ matrix.platform }} ${{ matrix.arch }}
+          fi
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: drivers-${{ matrix.platform }}-${{ matrix.arch }}
@@ -352,7 +367,7 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -363,7 +378,7 @@ jobs:
           cache: false
           components: "clippy"
 
-      - uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f  # v0.10.0
+      - uses: prefix-dev/setup-pixi@f00437f565399d418b0acc85936d12c1fb668347  # v0.10.1
         with:
           pixi-version: v0.72.0
           run-install: false
@@ -433,11 +448,11 @@ jobs:
           - { platform: windows, arch: amd64, runner: windows-latest }
     steps:
       # for now, install dbc from main
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           cache: false
           go-version: 'stable'
-      - uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f  # v0.10.0
+      - uses: prefix-dev/setup-pixi@f00437f565399d418b0acc85936d12c1fb668347  # v0.10.1
         with:
           pixi-version: v0.72.0
           run-install: false
@@ -458,7 +473,7 @@ jobs:
           echo "Installing ${driver_pkg}"
           ./dbc install --no-verify "${driver_pkg}"
           echo "Installed ${driver_pkg}"
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 1
           persist-credentials: false
@@ -494,13 +509,13 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
           submodules: 'recursive'
 
-      - uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f  # v0.10.0
+      - uses: prefix-dev/setup-pixi@f00437f565399d418b0acc85936d12c1fb668347  # v0.10.1
         with:
           pixi-version: v0.72.0
           run-install: false
