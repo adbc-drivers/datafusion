@@ -15,9 +15,9 @@
 
 main() {
     # Rust always marks no_mangle symbols as public. On macOS, rustc passes
-    # those symbols to the linker in an exported symbols list. Replace that
-    # list with a wildcard for the public ADBC entry points so symbols from
-    # native dependencies (such as BLAKE3 on aarch64) remain hidden.
+    # those symbols to the linker in an exported symbols list. The BLAKE3
+    # crate happens to have such a symbol on aarch64, so filter it from the
+    # list while preserving the exports required by other Rust crates.
     # https://github.com/rust-lang/rust/issues/73958
     local previous_arg=""
     for arg in "$@"; do
@@ -31,7 +31,7 @@ main() {
         if [[ -n "${exported_symbols_list}" ]]; then
             local scratch
             scratch=$(mktemp)
-            printf '%s\n' '_Adbc*' > "${scratch}"
+            grep -v 'blake3_' "${exported_symbols_list}" > "${scratch}" || true
             mv "${scratch}" "${exported_symbols_list}"
         fi
 
