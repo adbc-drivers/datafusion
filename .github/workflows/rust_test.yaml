@@ -337,6 +337,17 @@ jobs:
         run: |
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
 
+      - name: Add dumpbin to PATH
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+          if (-not $dumpbin) {
+            throw "Could not find dumpbin.exe using vswhere"
+          }
+          Split-Path $dumpbin -Parent | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
       - name: Build Library
         working-directory: .
         env:
