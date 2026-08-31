@@ -37,7 +37,7 @@ arrow-select = "58.4"
 async-trait = "0.1"
 aws-config = "1.8"
 aws-credential-types = "1.2"
-datafusion = { version = "54.1", default-features = false, features = ["avro", "compression", "crypto_expressions", "datetime_expressions", "nested_expressions", "parquet", "recursive_protection", "regex_expressions", "sql", "unicode_expressions"] }
+datafusion = { version = "55.0", default-features = false, features = ["avro", "compression", "crypto_expressions", "datetime_expressions", "nested_expressions", "parquet", "recursive_protection", "regex_expressions", "sql", "unicode_expressions"] }
 datafusion-proto = { version = "54.1", default-features = false }
 datafusion-substrait = { version = "54.1", default-features = false }
 # Pin the last version using adbc 23 and arrow 58 for now - datafusion still uses arrow 58
