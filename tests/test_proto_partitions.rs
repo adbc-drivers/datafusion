@@ -33,17 +33,18 @@ use arrow_array::{ArrayRef, Int32Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use async_trait::async_trait;
 use datafusion::catalog::{Session, TableProvider};
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::execution::TaskContext;
 use datafusion::logical_expr::{Expr, TableType};
-use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::memory::MemoryStream;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
     SendableRecordBatchStream,
 };
-use datafusion_proto::physical_plan::PhysicalExtensionCodec;
+use datafusion_proto::physical_plan::{PhysicalExtensionCodec, PhysicalProtoConverterExtension};
 
 /// Single `Int32` column named `v`.
 fn schema() -> SchemaRef {
@@ -96,6 +97,13 @@ impl ExecutionPlan for CustomExec {
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DFResult<TreeNodeRecursion>,
+    ) -> DFResult<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn with_new_children(
@@ -167,6 +175,7 @@ impl PhysicalExtensionCodec for CustomCodec {
         buf: &[u8],
         _inputs: &[Arc<dyn ExecutionPlan>],
         _ctx: &TaskContext,
+        _proto_converter: &dyn PhysicalProtoConverterExtension,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
         if buf.len() < 8 {
             return Err(DataFusionError::Internal("short CustomExec buffer".into()));
@@ -179,7 +188,12 @@ impl PhysicalExtensionCodec for CustomCodec {
         Ok(Arc::new(CustomExec::new(data, partitions)))
     }
 
-    fn try_encode(&self, node: Arc<dyn ExecutionPlan>, buf: &mut Vec<u8>) -> DFResult<()> {
+    fn try_encode(
+        &self,
+        node: Arc<dyn ExecutionPlan>,
+        buf: &mut Vec<u8>,
+        _proto_converter: &dyn PhysicalProtoConverterExtension,
+    ) -> DFResult<()> {
         let exec = node
             .downcast_ref::<CustomExec>()
             .ok_or_else(|| DataFusionError::Internal("not a CustomExec".into()))?;
@@ -202,11 +216,17 @@ impl PhysicalExtensionCodec for FailingCodec {
         _buf: &[u8],
         _inputs: &[Arc<dyn ExecutionPlan>],
         _ctx: &TaskContext,
+        _proto_converter: &dyn PhysicalProtoConverterExtension,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
         Err(DataFusionError::Internal("decode unsupported".into()))
     }
 
-    fn try_encode(&self, _node: Arc<dyn ExecutionPlan>, _buf: &mut Vec<u8>) -> DFResult<()> {
+    fn try_encode(
+        &self,
+        _node: Arc<dyn ExecutionPlan>,
+        _buf: &mut Vec<u8>,
+        _proto_converter: &dyn PhysicalProtoConverterExtension,
+    ) -> DFResult<()> {
         Err(DataFusionError::Internal("encode unsupported".into()))
     }
 }
@@ -224,13 +244,19 @@ impl PhysicalExtensionCodec for CountingCodec {
         buf: &[u8],
         inputs: &[Arc<dyn ExecutionPlan>],
         ctx: &TaskContext,
+        proto_converter: &dyn PhysicalProtoConverterExtension,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
         self.decodes.fetch_add(1, Ordering::SeqCst);
-        CustomCodec.try_decode(buf, inputs, ctx)
+        CustomCodec.try_decode(buf, inputs, ctx, proto_converter)
     }
 
-    fn try_encode(&self, node: Arc<dyn ExecutionPlan>, buf: &mut Vec<u8>) -> DFResult<()> {
-        CustomCodec.try_encode(node, buf)
+    fn try_encode(
+        &self,
+        node: Arc<dyn ExecutionPlan>,
+        buf: &mut Vec<u8>,
+        proto_converter: &dyn PhysicalProtoConverterExtension,
+    ) -> DFResult<()> {
+        CustomCodec.try_encode(node, buf, proto_converter)
     }
 }
 
