@@ -163,27 +163,30 @@ async fn register_object_store_for_plan(
     use datafusion::datasource::listing::ListingTableUrl;
     use datafusion::logical_expr::DdlStatement;
 
-    let location = match plan {
-        LogicalPlan::Ddl(DdlStatement::CreateExternalTable(cmd)) => &cmd.location,
-        LogicalPlan::Copy(copy_to) => &copy_to.output_url,
+    let locations = match plan {
+        LogicalPlan::Ddl(DdlStatement::CreateExternalTable(cmd)) => cmd.locations.as_slice(),
+        LogicalPlan::Copy(copy_to) => std::slice::from_ref(&copy_to.output_url),
         _ => return Ok(()),
     };
 
-    let table_url = ListingTableUrl::parse(location)?;
-    let scheme = table_url.scheme();
-    let url = table_url.as_ref();
+    for location in locations {
+        let table_url = ListingTableUrl::parse(location)?;
+        let scheme = table_url.scheme();
+        let url = table_url.as_ref();
 
-    if ctx
-        .runtime_env()
-        .object_store_registry
-        .get_store(url)
-        .is_err()
-    {
-        let state = ctx.state();
-        let table_options = state.default_table_options();
-        let store =
-            object_storage::get_object_store(&state, scheme, url, &table_options, false).await?;
-        ctx.runtime_env().register_object_store(url, store);
+        if ctx
+            .runtime_env()
+            .object_store_registry
+            .get_store(url)
+            .is_err()
+        {
+            let state = ctx.state();
+            let table_options = state.default_table_options();
+            let store =
+                object_storage::get_object_store(&state, scheme, url, &table_options, false)
+                    .await?;
+            ctx.runtime_env().register_object_store(url, store);
+        }
     }
     Ok(())
 }
