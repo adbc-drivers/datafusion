@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "adbc-driver-datafusion"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "adbc_core",
  "adbc_ffi",
