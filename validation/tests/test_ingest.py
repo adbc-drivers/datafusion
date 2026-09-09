@@ -125,7 +125,6 @@ def test_append_preserves_table_reference(driver, driver_path, mode, target, dec
         driver=driver_path, autocommit=True
     ) as connection:
         with connection.cursor() as cursor:
-            created = []
             for reference, values in [(target, [10]), (decoy, [100])]:
                 if reference is None:
                     continue
@@ -136,7 +135,6 @@ def test_append_preserves_table_reference(driver, driver_path, mode, target, dec
                     namespace = sql_reference((catalog, schema))
                     cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {namespace}")
                 assert ingest(connection, reference, values, "create") == 1
-                created.append(reference)
 
             assert ingest(connection, target, [20, 30], mode) == 2
             cursor.execute(f"SELECT value FROM {sql_reference(target)} ORDER BY value")
