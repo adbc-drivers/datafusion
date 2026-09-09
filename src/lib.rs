@@ -1172,8 +1172,9 @@ impl DataFusionStatement {
                         .ctx
                         .read_batches(batches)
                         .map_err(ErrorHelper::from_datafusion)?;
+                    // XXX: DataFusion reparses the table name into a TableReference. Ideally it would accept a TableReference directly
                     df.write_table(
-                        &table_ref.to_string(),
+                        &table_ref.to_quoted_string(),
                         DataFrameWriteOptions::new().with_insert_operation(InsertOp::Append),
                     )
                     .await
@@ -1207,8 +1208,9 @@ impl DataFusionStatement {
                             .ctx
                             .read_batches(batches)
                             .map_err(ErrorHelper::from_datafusion)?;
+                        // XXX: DataFusion reparses the table name into a TableReference. Ideally it would accept a TableReference directly
                         df.write_table(
-                            &table_ref.to_string(),
+                            &table_ref.to_quoted_string(),
                             DataFrameWriteOptions::new().with_insert_operation(InsertOp::Append),
                         )
                         .await
