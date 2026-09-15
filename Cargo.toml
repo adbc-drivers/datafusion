@@ -60,3 +60,10 @@ ffi = ["dep:adbc_ffi"]
 
 [lib]
 crate-type = ["lib", "cdylib"]
+
+[lints.rust]
+# allow linker warnings; on macOS the linker emits "__eh_frame section too
+# large (max 16MB) to encode dwarf unwind offsets in compact unwind table,
+# performance of exception handling might be affected" but this isn't a big
+# deal
+linker_messages = "allow"
