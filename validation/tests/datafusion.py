@@ -23,7 +23,7 @@ class DataFusionQuirks(model.DriverQuirks):
     driver = "adbc_driver_datafusion"
     driver_name = "ADBC Driver Foundry Driver for Apache DataFusion"
     vendor_name = "Apache DataFusion"
-    vendor_version = "55.0.0"
+    vendor_version = "55.1.0"
     short_version = "55"
     features = model.DriverFeatures(
         statement_bind=True,
