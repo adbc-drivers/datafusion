@@ -30,17 +30,16 @@ edition = "2024"
 [dependencies]
 adbc_core = "0.24.0"
 adbc_ffi = { version = "0.24.0", optional = true }
-arrow-array = "59.2"
-arrow-buffer = "59.2"
-arrow-schema = "59.2"
-arrow-select = "59.2"
+arrow-array = "59.3"
+arrow-buffer = "59.3"
+arrow-schema = "59.3"
+arrow-select = "59.3"
 async-trait = "0.1"
 aws-config = "1.8"
 aws-credential-types = "1.2"
-datafusion = { version = "55.0", default-features = false, features = ["avro", "compression", "crypto_expressions", "datetime_expressions", "nested_expressions", "parquet", "recursive_protection", "regex_expressions", "sql", "unicode_expressions"] }
-datafusion-proto = { version = "55.0", default-features = false }
-datafusion-substrait = { version = "55.0", default-features = false }
-# Pin the last version using adbc 23 and arrow 58 for now - datafusion still uses arrow 58
+datafusion = { version = "55.1", default-features = false, features = ["avro", "compression", "crypto_expressions", "datetime_expressions", "nested_expressions", "parquet", "recursive_protection", "regex_expressions", "sql", "unicode_expressions"] }
+datafusion-proto = { version = "55.1", default-features = false }
+datafusion-substrait = { version = "55.1", default-features = false }
 driverbase = { git = "https://github.com/adbc-drivers/driverbase-rs.git" }
 futures = "0.3.32"
 log = "0.4"
