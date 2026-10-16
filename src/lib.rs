@@ -23,6 +23,7 @@
 mod bind;
 mod catalog;
 mod get_objects;
+mod meta;
 mod object_storage;
 use adbc_core::constants;
 use datafusion::common::TableReference;
@@ -59,6 +60,8 @@ use adbc_core::{
 
 use driverbase::bulk_ingest::BulkIngestState;
 use driverbase::error::ErrorHelper as _;
+
+use crate::meta::MetadataCollectionState;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ErrorHelper {}
@@ -678,6 +681,7 @@ impl Connection for DataFusionConnection {
             query: None,
             bound: None,
             ingest: BulkIngestState::new(),
+            meta: MetadataCollectionState::new(meta::SUPPORTED_METADATA_COLLECTIONS.clone()),
         })
     }
 
@@ -966,6 +970,7 @@ pub struct DataFusionStatement {
     query: Option<QueryState>,
     bound: Option<Box<dyn RecordBatchReader + Send>>,
     ingest: BulkIngestState<ErrorHelper>,
+    meta: crate::meta::MetadataCollectionState<Arc<SessionContext>>,
 }
 
 impl Optionable for DataFusionStatement {
@@ -978,6 +983,13 @@ impl Optionable for DataFusionStatement {
     ) -> adbc_core::error::Result<()> {
         if self
             .ingest
+            .set_option(&key, &value)
+            .map_err(|e| e.to_adbc())?
+        {
+            return Ok(());
+        }
+        if self
+            .meta
             .set_option(&key, &value)
             .map_err(|e| e.to_adbc())?
         {
@@ -1247,6 +1259,13 @@ impl Statement for DataFusionStatement {
     }
 
     fn execute(&mut self) -> Result<Box<dyn RecordBatchReader + Send>> {
+        if let Some(meta_request) = self.meta.take() {
+            return self
+                .runtime
+                .block_on(meta_request.execute(self.ctx.clone()))
+                .map_err(|e| e.to_adbc());
+        }
+
         if let Some(reader) = self.bound.take() {
             return self.execute_with_params(reader);
         }
