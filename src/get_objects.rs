@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use arrow_array::{Array, RecordBatch, StringArray};
+use arrow_array::{Array, Int32Array, RecordBatch, StringArray};
 use datafusion::common::ScalarValue;
 use datafusion::prelude::SessionContext;
 use regex::Regex;
@@ -183,8 +183,10 @@ impl GetObjectsImpl<ErrorHelper> for DataFusionGetObjects {
         table_type_filter: Option<&[String]>,
         column_filter: Option<&str>,
     ) -> Result<Vec<TableAndColumnInfo>, DriverError> {
+        // DataFusion reports zero-based positions; ADBC expects one-based positions.
         let mut sql = String::from(
-            "SELECT c.table_name, t.table_type, c.column_name \
+            "SELECT c.table_name, t.table_type, c.column_name, \
+                    CAST(c.ordinal_position + 1 AS INT) \
              FROM information_schema.columns c \
              JOIN information_schema.tables t \
                ON c.table_catalog = t.table_catalog \
@@ -234,6 +236,14 @@ impl GetObjectsImpl<ErrorHelper> for DataFusionGetObjects {
             let table_names = Self::string_column(batch, 0)?;
             let table_types = Self::string_column(batch, 1)?;
             let column_names = Self::string_column(batch, 2)?;
+            let ordinal_positions = batch
+                .column(3)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .ok_or_else(|| {
+                    ErrorHelper::internal(driverbase::location!())
+                        .message("expected Int32Array column in information_schema result")
+                })?;
 
             for i in 0..batch.num_rows() {
                 let tname = table_names.value(i);
@@ -259,6 +269,9 @@ impl GetObjectsImpl<ErrorHelper> for DataFusionGetObjects {
                 if let Some(last) = result.last_mut() {
                     last.columns.push(ColumnInfo {
                         column_name: cname.to_string(),
+                        ordinal_position: ordinal_positions
+                            .is_valid(i)
+                            .then(|| ordinal_positions.value(i)),
                     });
                 }
             }
