@@ -121,26 +121,26 @@ def test_append_preserves_table_reference(driver, driver_path, mode, target, dec
             )
 
     # Use a separate database for each case for isolation
-    with adbc_driver_manager.dbapi.connect(
-        driver=driver_path, autocommit=True
-    ) as connection:
-        with connection.cursor() as cursor:
-            for reference, values in [(target, [10]), (decoy, [100])]:
-                if reference is None:
-                    continue
-                catalog, schema, _ = reference
-                if catalog is not None:
-                    cursor.execute(f"CREATE DATABASE IF NOT EXISTS {quote(catalog)}")
-                if schema is not None:
-                    namespace = sql_reference((catalog, schema))
-                    cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {namespace}")
-                assert ingest(connection, reference, values, "create") == 1
+    with (
+        adbc_driver_manager.dbapi.connect(
+            driver=driver_path, autocommit=True
+        ) as connection,
+        connection.cursor() as cursor,
+    ):
+        for reference, values in [(target, [10]), (decoy, [100])]:
+            if reference is None:
+                continue
+            catalog, schema, _ = reference
+            if catalog is not None:
+                cursor.execute(f"CREATE DATABASE IF NOT EXISTS {quote(catalog)}")
+            if schema is not None:
+                namespace = sql_reference((catalog, schema))
+                cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {namespace}")
+            assert ingest(connection, reference, values, "create") == 1
 
-            assert ingest(connection, target, [20, 30], mode) == 2
-            cursor.execute(f"SELECT value FROM {sql_reference(target)} ORDER BY value")
-            assert cursor.fetchall() == [(10,), (20,), (30,)]
-            if decoy is not None:
-                cursor.execute(
-                    f"SELECT value FROM {sql_reference(decoy)} ORDER BY value"
-                )
-                assert cursor.fetchall() == [(100,)]
+        assert ingest(connection, target, [20, 30], mode) == 2
+        cursor.execute(f"SELECT value FROM {sql_reference(target)} ORDER BY value")
+        assert cursor.fetchall() == [(10,), (20,), (30,)]
+        if decoy is not None:
+            cursor.execute(f"SELECT value FROM {sql_reference(decoy)} ORDER BY value")
+            assert cursor.fetchall() == [(100,)]

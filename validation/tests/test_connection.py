@@ -29,12 +29,14 @@ class TestConnection(connection_tests.TestConnection):
 
 
 def test_uri(driver, driver_path) -> None:
-    with adbc_driver_manager.dbapi.connect(
-        driver=driver_path,
-        uri="datafusion://",
-        autocommit=True,
-    ) as conn:
-        with conn.cursor() as cursor:
-            cursor.adbc_statement.set_sql_query("SELECT 1")
-            handle, _ = cursor.adbc_statement.execute_query()
-            assert handle is not None
+    with (
+        adbc_driver_manager.dbapi.connect(
+            driver=driver_path,
+            uri="datafusion://",
+            autocommit=True,
+        ) as conn,
+        conn.cursor() as cursor,
+    ):
+        cursor.adbc_statement.set_sql_query("SELECT 1")
+        handle, _ = cursor.adbc_statement.execute_query()
+        assert handle is not None

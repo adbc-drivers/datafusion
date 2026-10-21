@@ -78,11 +78,10 @@ def conn_factory(
 def _setup_resources(
     conn_factory: typing.Callable[[], adbc_driver_manager.dbapi.Connection],
 ) -> None:
-    with conn_factory() as c:
-        with c.cursor() as cursor:
-            for statement in [
-                "CREATE SCHEMA IF NOT EXISTS secondary",
-                "CREATE DATABASE IF NOT EXISTS secondary_catalog",
-                "CREATE SCHEMA IF NOT EXISTS secondary_catalog.secondary_schema",
-            ]:
-                cursor.execute(statement)
+    with conn_factory() as c, c.cursor() as cursor:
+        for statement in [
+            "CREATE SCHEMA IF NOT EXISTS secondary",
+            "CREATE DATABASE IF NOT EXISTS secondary_catalog",
+            "CREATE SCHEMA IF NOT EXISTS secondary_catalog.secondary_schema",
+        ]:
+            cursor.execute(statement)
