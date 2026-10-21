@@ -22,6 +22,8 @@
 
 use adbc_core::{Connection, Database, Driver, Optionable, Statement};
 use adbc_driver_datafusion::{ContextInit, DataFusionConnection, DataFusionDriver, DatabaseOpts};
+use arrow_array::cast::AsArray;
+use arrow_array::types::Int32Type;
 use arrow_array::{ArrayRef, Int32Array, RecordBatch};
 use datafusion::prelude::*;
 use std::error::Error as StdError;
@@ -326,6 +328,88 @@ fn test_get_objects_database() {
     let objects = get_objects(&connection);
 
     assert_eq!(objects.num_rows(), 2);
+}
+
+#[test]
+fn test_get_objects_column_ordinals() {
+    let mut connection = get_connection(None);
+    let mut statement = connection.new_statement().unwrap();
+    statement
+        .set_sql_query(
+            "CREATE TABLE ordinal_test (first INT, keep_second INT, third INT, keep_fourth INT)",
+        )
+        .unwrap();
+    statement.execute_update().unwrap();
+
+    for (filter, expected) in [
+        (
+            None,
+            vec![
+                ("first", Some(1)),
+                ("keep_second", Some(2)),
+                ("third", Some(3)),
+                ("keep_fourth", Some(4)),
+            ],
+        ),
+        (Some("keep_second"), vec![("keep_second", Some(2))]),
+        (
+            Some("keep_%"),
+            vec![("keep_second", Some(2)), ("keep_fourth", Some(4))],
+        ),
+        (Some("missing"), vec![]),
+    ] {
+        let reader = connection
+            .get_objects(
+                adbc_core::options::ObjectDepth::All,
+                Some("datafusion"),
+                Some("public"),
+                Some("ordinal_test"),
+                None,
+                filter,
+            )
+            .unwrap();
+        let mut actual = Vec::new();
+        for batch in reader {
+            let batch = batch.unwrap();
+            let schemas = batch
+                .column_by_name("catalog_db_schemas")
+                .unwrap()
+                .as_list::<i32>()
+                .values()
+                .as_struct();
+            let tables = schemas
+                .column_by_name("db_schema_tables")
+                .unwrap()
+                .as_list::<i32>()
+                .values()
+                .as_struct();
+            let columns = tables
+                .column_by_name("table_columns")
+                .unwrap()
+                .as_list::<i32>()
+                .values()
+                .as_struct();
+            let names = columns
+                .column_by_name("column_name")
+                .unwrap()
+                .as_string::<i32>();
+            let positions = columns
+                .column_by_name("ordinal_position")
+                .unwrap()
+                .as_primitive::<Int32Type>();
+            actual.extend(
+                names
+                    .iter()
+                    .zip(positions.iter())
+                    .map(|(name, position)| (name.unwrap().to_string(), position)),
+            );
+        }
+        let expected: Vec<_> = expected
+            .into_iter()
+            .map(|(name, position)| (name.to_string(), position))
+            .collect();
+        assert_eq!(actual, expected, "column filter: {filter:?}");
+    }
 }
 
 #[test]
