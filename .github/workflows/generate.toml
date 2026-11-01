@@ -22,3 +22,7 @@ subdir = "."
 [secrets]
 # so we can use gh CLI to download protoc without rate limits
 GH_TOKEN = { secret = "GITHUB_TOKEN", contexts = ["build:test", "build:release"] }
+
+[validation.extra-pypi-dependencies]
+# for ci/test_package.py (PyArrow isn't available on win-arm64)
+duckdb = ">=2,<3"
