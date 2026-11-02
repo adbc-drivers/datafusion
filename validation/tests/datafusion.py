@@ -57,6 +57,20 @@ class DataFusionQuirks(model.DriverQuirks):
     def bind_parameter(self, index: int) -> str:
         return f"${index}"
 
+    def query_override(self, context: str, default: str) -> str:
+        if context == "TestIngest.test_create_dictionary":
+            # DataFusion preserves dictionaries on ingest; decode for comparison.
+            for name, arrow_type in [("string", "Utf8"), ("large_string", "LargeUtf8")]:
+                table = self.quote_identifier(f"test_ingest_create_dictionary_{name}")
+                idx = self.quote_identifier("idx")
+                value = self.quote_identifier("value")
+                if default == f"SELECT {idx}, {value} FROM {table}":
+                    return (
+                        f"SELECT {idx}, arrow_cast({value}, '{arrow_type}') AS {value} "
+                        f"FROM {table}"
+                    )
+        return default
+
     def is_table_not_found(self, table_name: str, error: Exception) -> bool:
         msg = str(error)
         if table_name and table_name not in msg:

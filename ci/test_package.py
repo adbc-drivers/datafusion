@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import adbc_driver_manager.dbapi
-import pyarrow
+import duckdb
 
 
 def test_package() -> None:
@@ -23,5 +23,5 @@ def test_package() -> None:
     ):
         cursor.adbc_statement.set_sql_query("SELECT 1")
         handle, _ = cursor.adbc_statement.execute_query()
-        with pyarrow.RecordBatchReader._import_from_c(handle.address) as reader:
-            reader.read_all()
+        duckdb.register("result", handle)
+        duckdb.sql("SELECT * FROM result").fetchall()
