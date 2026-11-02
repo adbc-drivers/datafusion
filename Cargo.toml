@@ -45,7 +45,7 @@ futures = "0.3.32"
 log = "0.4"
 lru = "0.19"
 object_store = { version = "0.13", features = ["aws", "gcp", "http"] }
-parking_lot = "0.12"
+parking_lot = "0.13"
 prost = "0.14.3"
 regex = "1"
 tokio = { version = "1.49", features = ["rt-multi-thread"] }
