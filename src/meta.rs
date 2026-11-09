@@ -40,27 +40,6 @@ impl MetadataCollection<Arc<SessionContext>, ErrorHelper> for CatalogCollection 
         Some("The catalogs defined in the database".to_string())
     }
 
-    fn schema(&self) -> Schema {
-        driverbase::meta::schema::CATALOG.clone()
-    }
-
-    fn supported_filters(&self) -> Vec<FilterDescription> {
-        vec![
-            FilterDescription {
-                name: "catalog".to_string(),
-                filter_type_string: true,
-                remarks: Some("The catalog name to filter by".to_string()),
-                ..Default::default()
-            },
-            FilterDescription {
-                name: "catalog".to_string(),
-                filter_type_string: true,
-                is_pattern: true,
-                ..Default::default()
-            },
-        ]
-    }
-
     fn init(&self) -> Box<dyn MetadataCollectionQuery<Arc<SessionContext>, ErrorHelper> + Send> {
         Box::new(CatalogCollectionQuery { catalog: None })
     }
@@ -82,6 +61,27 @@ impl MetadataCollectionQuery<Arc<SessionContext>, ErrorHelper> for CatalogCollec
                 "unsupported filter {name} for metadata collection 'catalogs'"
             ))),
         }
+    }
+
+    fn schema(&self) -> Schema {
+        driverbase::meta::schema::CATALOG.clone()
+    }
+
+    fn supported_filters(&self) -> Vec<FilterDescription> {
+        vec![
+            FilterDescription {
+                name: "catalog".to_string(),
+                filter_type_string: true,
+                remarks: Some("The catalog name to filter by".to_string()),
+                ..Default::default()
+            },
+            FilterDescription {
+                name: "catalog".to_string(),
+                filter_type_string: true,
+                is_pattern: true,
+                ..Default::default()
+            },
+        ]
     }
 
     async fn execute(
@@ -127,6 +127,31 @@ impl MetadataCollection<Arc<SessionContext>, ErrorHelper> for SchemaCollection {
         Some("The schemas defined in the database".to_string())
     }
 
+    fn init(&self) -> Box<dyn MetadataCollectionQuery<Arc<SessionContext>, ErrorHelper> + Send> {
+        Box::new(SchemaCollectionQuery::default())
+    }
+}
+
+#[derive(Default)]
+struct SchemaCollectionQuery {
+    catalog: Option<Filter>,
+    schema: Option<Filter>,
+}
+
+#[async_trait::async_trait]
+impl MetadataCollectionQuery<Arc<SessionContext>, ErrorHelper> for SchemaCollectionQuery {
+    fn add_filter(&mut self, name: &str, value: Filter) -> Result<(), ErrorHelper> {
+        match name {
+            "schema" => {
+                self.schema = Some(value);
+                Ok(())
+            }
+            _ => Err(ErrorHelper::invalid_argument().format(format_args!(
+                "unsupported filter {name} for metadata collection 'schemas'"
+            ))),
+        }
+    }
+
     fn schema(&self) -> Schema {
         driverbase::meta::schema::SCHEMA.clone()
     }
@@ -158,31 +183,6 @@ impl MetadataCollection<Arc<SessionContext>, ErrorHelper> for SchemaCollection {
                 ..Default::default()
             },
         ]
-    }
-
-    fn init(&self) -> Box<dyn MetadataCollectionQuery<Arc<SessionContext>, ErrorHelper> + Send> {
-        Box::new(SchemaCollectionQuery::default())
-    }
-}
-
-#[derive(Default)]
-struct SchemaCollectionQuery {
-    catalog: Option<Filter>,
-    schema: Option<Filter>,
-}
-
-#[async_trait::async_trait]
-impl MetadataCollectionQuery<Arc<SessionContext>, ErrorHelper> for SchemaCollectionQuery {
-    fn add_filter(&mut self, name: &str, value: Filter) -> Result<(), ErrorHelper> {
-        match name {
-            "schema" => {
-                self.schema = Some(value);
-                Ok(())
-            }
-            _ => Err(ErrorHelper::invalid_argument().format(format_args!(
-                "unsupported filter {name} for metadata collection 'schemas'"
-            ))),
-        }
     }
 
     async fn execute(

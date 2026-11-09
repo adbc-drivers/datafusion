@@ -26,33 +26,55 @@ def pytest_generate_tests(metafunc) -> None:
 
 class TestConnection(connection_tests.TestConnection):
     def test_meta_collection_meta(self, driver, conn) -> None:
+        collection_schema = pyarrow.schema(
+            [
+                ("collection_name", pyarrow.string(), False),
+                ("collection_remarks", pyarrow.string(), True),
+            ]
+        )
+
         with conn.cursor() as cursor:
             cursor.adbc_statement.set_options(
                 **{
                     "adbc.metadata.collection": "meta",
                 }
             )
+
+            filters = pyarrow.schema(cursor.adbc_statement.get_parameter_schema())
+            assert len(filters) == 0
+
+            schema = pyarrow.schema(cursor.adbc_statement.execute_schema())
+            assert schema == collection_schema
+
             handle, _ = cursor.adbc_statement.execute_query()
             with pyarrow.RecordBatchReader._import_from_c(handle.address) as reader:
                 result = reader.read_all()
                 print(result.to_pylist())
 
     def test_meta_collection_catalogs(self, driver, conn) -> None:
+        collection_schema = pyarrow.schema(
+            [
+                ("catalog_name", pyarrow.string(), True),
+                ("catalog_remarks", pyarrow.string(), True),
+            ]
+        )
         with conn.cursor() as cursor:
             cursor.adbc_statement.set_options(
                 **{
                     "adbc.metadata.collection": "catalogs",
                 }
             )
+
+            filters = pyarrow.schema(cursor.adbc_statement.get_parameter_schema())
+            assert len(filters) == 2
+
+            schema = pyarrow.schema(cursor.adbc_statement.execute_schema())
+            assert schema == collection_schema
+
             handle, _ = cursor.adbc_statement.execute_query()
             with pyarrow.RecordBatchReader._import_from_c(handle.address) as reader:
                 result = reader.read_all()
-                assert result.schema == pyarrow.schema(
-                    [
-                        ("catalog_name", pyarrow.string(), True),
-                        ("catalog_remarks", pyarrow.string(), True),
-                    ]
-                )
+                assert result.schema == collection_schema
                 catalogs = result[0].to_pylist()
                 assert sorted(catalogs) == catalogs
                 assert driver.features.current_catalog in catalogs

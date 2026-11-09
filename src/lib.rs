@@ -1266,6 +1266,14 @@ impl Statement for DataFusionStatement {
                 .block_on(meta_request.execute(self.ctx.clone()))
                 .map_err(|e| e.to_adbc());
         }
+        if self.ingest.is_set() {
+            self.execute_bulk_ingest()?;
+            return Ok(
+                Box::new(SingleBatchReader::new(RecordBatch::new_empty(Arc::new(
+                    arrow_schema::Schema::empty(),
+                )))) as Box<dyn RecordBatchReader + Send>,
+            );
+        }
 
         if let Some(reader) = self.bound.take() {
             return self.execute_with_params(reader);
@@ -1289,6 +1297,11 @@ impl Statement for DataFusionStatement {
     }
 
     fn execute_update(&mut self) -> adbc_core::error::Result<Option<i64>> {
+        if self.meta.is_set() {
+            return Err(ErrorHelper::invalid_state()
+                .message("metadata collection does not support execute_update")
+                .to_adbc());
+        }
         if self.ingest.is_set() {
             return self.execute_bulk_ingest();
         }
@@ -1313,6 +1326,15 @@ impl Statement for DataFusionStatement {
     }
 
     fn execute_schema(&mut self) -> adbc_core::error::Result<arrow_schema::Schema> {
+        if let Some(meta_request) = self.meta.as_ref() {
+            return Ok(meta_request.schema());
+        }
+        if self.ingest.is_set() {
+            return Err(ErrorHelper::invalid_state()
+                .message("bulk ingest does not support execute_schema")
+                .to_adbc());
+        }
+
         self.runtime.block_on(async {
             match &self.query {
                 Some(QueryState::Sql(query)) => {
@@ -1405,6 +1427,12 @@ impl Statement for DataFusionStatement {
     }
 
     fn get_parameter_schema(&self) -> adbc_core::error::Result<arrow_schema::Schema> {
+        if let Some(meta_request) = self.meta.as_ref() {
+            return Ok(driverbase::meta::get_filter_schema(
+                &meta_request.supported_filters(),
+            ));
+        }
+
         let param_types = match &self.query {
             Some(QueryState::Prepared(plan)) => plan
                 .get_parameter_types()
