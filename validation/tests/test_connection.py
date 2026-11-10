@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 import adbc_driver_manager.dbapi
 import adbc_drivers_validation.tests.connection as connection_tests
+import pyarrow
 
 from . import datafusion
 
@@ -25,7 +25,61 @@ def pytest_generate_tests(metafunc) -> None:
 
 
 class TestConnection(connection_tests.TestConnection):
-    pass
+    def test_meta_collection_meta(self, driver, conn) -> None:
+        with conn.cursor() as cursor:
+            cursor.adbc_statement.set_options(
+                **{
+                    "adbc.metadata.collection": "meta",
+                }
+            )
+            handle, _ = cursor.adbc_statement.execute_query()
+            with pyarrow.RecordBatchReader._import_from_c(handle.address) as reader:
+                result = reader.read_all()
+                print(result.to_pylist())
+
+    def test_meta_collection_catalogs(self, driver, conn) -> None:
+        with conn.cursor() as cursor:
+            cursor.adbc_statement.set_options(
+                **{
+                    "adbc.metadata.collection": "catalogs",
+                }
+            )
+            handle, _ = cursor.adbc_statement.execute_query()
+            with pyarrow.RecordBatchReader._import_from_c(handle.address) as reader:
+                result = reader.read_all()
+                assert result.schema == pyarrow.schema(
+                    [
+                        ("catalog_name", pyarrow.string(), True),
+                        ("catalog_remarks", pyarrow.string(), True),
+                    ]
+                )
+                catalogs = result[0].to_pylist()
+                assert sorted(catalogs) == catalogs
+                assert driver.features.current_catalog in catalogs
+                assert driver.features.secondary_catalog in catalogs
+
+    def test_meta_collection_schemas(self, driver, conn) -> None:
+        with conn.cursor() as cursor:
+            cursor.adbc_statement.set_options(
+                **{
+                    "adbc.metadata.collection": "schemas",
+                }
+            )
+            handle, _ = cursor.adbc_statement.execute_query()
+            with pyarrow.RecordBatchReader._import_from_c(handle.address) as reader:
+                result = reader.read_all()
+                print(result.to_pylist())
+
+            cursor.adbc_statement.set_options(
+                **{
+                    "adbc.metadata.collection": "schemas",
+                    "adbc.metadata.filter_pattern.schema": "secondary%",
+                }
+            )
+            handle, _ = cursor.adbc_statement.execute_query()
+            with pyarrow.RecordBatchReader._import_from_c(handle.address) as reader:
+                result = reader.read_all()
+                print(result.to_pylist())
 
 
 def test_uri(driver, driver_path) -> None:
