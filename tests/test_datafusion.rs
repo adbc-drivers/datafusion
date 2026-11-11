@@ -33,8 +33,11 @@ use adbc_core::options::{OptionConnection, OptionDatabase, OptionStatement, Opti
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use arrow_select::concat::concat_batches;
 use datafusion::datasource::MemTable;
+#[cfg(feature = "substrait")]
 use datafusion_substrait::logical_plan::producer::to_substrait_plan;
+#[cfg(feature = "substrait")]
 use datafusion_substrait::substrait::proto::Plan;
+#[cfg(feature = "substrait")]
 use prost::Message;
 
 fn get_connection(handle: Option<tokio::runtime::Handle>) -> DataFusionConnection {
@@ -115,6 +118,7 @@ fn answer_table(value: i32) -> datafusion::error::Result<MemTable> {
     MemTable::try_new(schema, vec![vec![batch]])
 }
 
+#[cfg(feature = "substrait")]
 fn execute_substrait(connection: &mut DataFusionConnection, plan: Plan) -> RecordBatch {
     let mut statement = connection.new_statement().unwrap();
 
@@ -460,6 +464,7 @@ fn test_ingest() {
     assert_eq!(batch.num_rows(), 6);
 }
 
+#[cfg(feature = "substrait")]
 #[test]
 fn test_execute_substrait() {
     let mut connection = get_connection(None);
