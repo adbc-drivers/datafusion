@@ -39,21 +39,24 @@ aws-config = "1.8"
 aws-credential-types = "1.2"
 datafusion = { version = "55.2", default-features = false, features = ["avro", "compression", "crypto_expressions", "datetime_expressions", "nested_expressions", "parquet", "recursive_protection", "regex_expressions", "sql", "unicode_expressions"] }
 datafusion-proto = { version = "55.2", default-features = false }
-datafusion-substrait = { version = "55.2", default-features = false }
+datafusion-substrait = { version = "55.2", default-features = false, optional = true }
 driverbase = { git = "https://github.com/adbc-drivers/driverbase-rs.git" }
 futures = "0.3.32"
 log = "0.4"
 lru = "0.19"
 object_store = { version = "0.13", features = ["aws", "gcp", "http"] }
 parking_lot = "0.12"
-prost = "0.14.3"
+prost = { version = "0.14.3", optional = true }
 regex = "1"
 tokio = { version = "1.49", features = ["rt-multi-thread"] }
 url = "2"
 
 [features]
-default = ["ffi"]
+default = ["ffi", "substrait"]
 ffi = ["dep:adbc_ffi"]
+# Substrait plans in `set_substrait_plan`. Without it the driver accepts SQL only and does
+# not need `protoc` to build.
+substrait = ["dep:datafusion-substrait", "dep:prost"]
 
 [dev-dependencies]
 
