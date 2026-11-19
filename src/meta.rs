@@ -80,22 +80,14 @@ impl MetadataCollectionQuery<Arc<SessionContext>, ErrorHelper> for CatalogCollec
 
         for filter_set in driverbase::meta::filter::untyped_filter_sets(filters)? {
             let filter_set = filter_set?;
-            if filter_set.is_empty() {
-                catalog_remarks.append_nulls(catalogs.len());
-                for name in &catalogs {
-                    catalog_name.append_value(name);
+            // TODO: validate no other filters (or update API to let us list accepted filters)
+            let catalog_filter = filter_set.get("catalog");
+            for name in &catalogs {
+                if catalog_filter.is_some_and(|filter| !filter.matches(name)) {
+                    continue;
                 }
-            } else {
-                // TODO: validate no other filters (or update API to let us list accepted filters)
-                for name in &catalogs {
-                    if let Some(filter) = filter_set.get("catalog") {
-                        if !filter.matches(name) {
-                            continue;
-                        }
-                    }
-                    catalog_name.append_value(name);
-                    catalog_remarks.append_null();
-                }
+                catalog_name.append_value(name);
+                catalog_remarks.append_null();
             }
         }
 
