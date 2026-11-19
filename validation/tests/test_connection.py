@@ -48,8 +48,10 @@ class TestConnection(connection_tests.TestConnection):
 
             handle, _ = cursor.adbc_statement.execute_query()
             with pyarrow.RecordBatchReader._import_from_c(handle.address) as reader:
-                result = reader.read_all()
-                print(result.to_pylist())
+                result = reader.read_all().to_pylist()
+                result.sort(key=lambda x: x["collection_name"])
+                collections = [row["collection_name"] for row in result]
+                assert collections == ["catalogs", "meta", "schemas"]
 
     def test_meta_collection_catalogs(self, driver, conn) -> None:
         collection_schema = pyarrow.schema(
@@ -80,28 +82,129 @@ class TestConnection(connection_tests.TestConnection):
                 assert driver.features.current_catalog in catalogs
                 assert driver.features.secondary_catalog in catalogs
 
-    def test_meta_collection_schemas(self, driver, conn) -> None:
-        with conn.cursor() as cursor:
             cursor.adbc_statement.set_options(
                 **{
-                    "adbc.metadata.collection": "schemas",
+                    "adbc.metadata.collection": "catalogs",
                 }
             )
+            filters = pyarrow.record_batch(
+                [["secondary_catalog"]],
+                schema=pyarrow.schema(
+                    [
+                        ("adbc.metadata.filter.catalog", pyarrow.string(), True),
+                    ]
+                ),
+            )
+            cursor.adbc_statement.bind(filters)
             handle, _ = cursor.adbc_statement.execute_query()
             with pyarrow.RecordBatchReader._import_from_c(handle.address) as reader:
                 result = reader.read_all()
-                print(result.to_pylist())
+                assert result.schema == collection_schema
+                catalogs = result[0].to_pylist()
+                assert catalogs == ["secondary_catalog"]
 
             cursor.adbc_statement.set_options(
                 **{
-                    "adbc.metadata.collection": "schemas",
-                    "adbc.metadata.filter_pattern.schema": "secondary%",
+                    "adbc.metadata.collection": "catalogs",
                 }
             )
+            filters = pyarrow.record_batch(
+                [
+                    ["secondary_catalog", None, "datafusion"],
+                    [None, "secondary%", None],
+                ],
+                schema=pyarrow.schema(
+                    [
+                        ("adbc.metadata.filter.catalog", pyarrow.string(), True),
+                        (
+                            "adbc.metadata.filter_pattern.catalog",
+                            pyarrow.string(),
+                            True,
+                        ),
+                    ]
+                ),
+            )
+            cursor.adbc_statement.bind(filters)
             handle, _ = cursor.adbc_statement.execute_query()
             with pyarrow.RecordBatchReader._import_from_c(handle.address) as reader:
                 result = reader.read_all()
-                print(result.to_pylist())
+                assert result.schema == collection_schema
+                catalogs = result[0].to_pylist()
+                assert catalogs == [
+                    "secondary_catalog",
+                    "secondary_catalog",
+                    "datafusion",
+                ]
+
+    def test_meta_collection_schemas(self, driver, conn) -> None:
+        collection_schema = pyarrow.schema(
+            [
+                ("catalog_name", pyarrow.string(), True),
+                ("db_schema_name", pyarrow.string(), False),
+                ("db_schema_remarks", pyarrow.string(), True),
+            ]
+        )
+        filter_columns = [
+            "adbc.metadata.filter.catalog",
+            "adbc.metadata.filter_pattern.catalog",
+            "adbc.metadata.filter.schema",
+            "adbc.metadata.filter_pattern.schema",
+        ]
+        current = (driver.features.current_catalog, driver.features.current_schema)
+        secondary = (
+            driver.features.secondary_catalog,
+            driver.features.secondary_catalog_schema,
+        )
+        with conn.cursor() as cursor:
+            statement = cursor.adbc_statement
+            statement.set_options(**{"adbc.metadata.collection": "schemas"})
+            filter_schema = pyarrow.schema(statement.get_parameter_schema())
+            assert filter_schema == pyarrow.schema(
+                [(name, pyarrow.string(), True) for name in filter_columns]
+            )
+            assert pyarrow.schema(statement.execute_schema()) == collection_schema
+
+            handle, _ = statement.execute_query()
+            with pyarrow.RecordBatchReader._import_from_c(handle.address) as reader:
+                result = reader.read_all()
+            assert result.schema == collection_schema
+            rows = list(zip(result[0].to_pylist(), result[1].to_pylist(), strict=True))
+            assert rows == sorted(rows)
+            assert current in rows
+            assert secondary in rows
+            assert result[2].null_count == result.num_rows
+
+            statement.set_options(**{"adbc.metadata.collection": "schemas"})
+            statement.bind(
+                pyarrow.record_batch(
+                    [
+                        [secondary[0], None, secondary[0], secondary[0]],
+                        [None, "datafus%", None, None],
+                        [None, current[1], None, current[1]],
+                        ["secondary%", None, "secondary%", None],
+                    ],
+                    schema=filter_schema,
+                )
+            )
+            handle, _ = statement.execute_query()
+            with pyarrow.RecordBatchReader._import_from_c(handle.address) as reader:
+                result = reader.read_all()
+            assert result.schema == collection_schema
+            assert list(
+                zip(result[0].to_pylist(), result[1].to_pylist(), strict=True)
+            ) == [
+                secondary,
+                current,
+                secondary,
+            ]
+
+            statement.set_options(**{"adbc.metadata.collection": "schemas"})
+            statement.bind(pyarrow.record_batch([[], [], [], []], schema=filter_schema))
+            handle, _ = statement.execute_query()
+            with pyarrow.RecordBatchReader._import_from_c(handle.address) as reader:
+                result = reader.read_all()
+            assert result.schema == collection_schema
+            assert result.num_rows == 0
 
 
 def test_uri(driver, driver_path) -> None:

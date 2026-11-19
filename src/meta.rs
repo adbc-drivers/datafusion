@@ -19,12 +19,9 @@ use std::sync::{Arc, LazyLock};
 use arrow_array::RecordBatchReader;
 use arrow_schema::Schema;
 use datafusion::execution::context::SessionContext;
-use driverbase::{
-    error::ErrorHelper as _,
-    meta::{
-        Filter, FilterDescription, MetadataCollection, MetadataCollectionQuery, Result,
-        SupportedMetadataCollections,
-    },
+use driverbase::meta::{
+    FilterDescription, MetadataCollection, MetadataCollectionQuery, Result,
+    SupportedMetadataCollections,
 };
 
 use super::ErrorHelper;
@@ -41,28 +38,14 @@ impl MetadataCollection<Arc<SessionContext>, ErrorHelper> for CatalogCollection 
     }
 
     fn init(&self) -> Box<dyn MetadataCollectionQuery<Arc<SessionContext>, ErrorHelper> + Send> {
-        Box::new(CatalogCollectionQuery { catalog: None })
+        Box::new(CatalogCollectionQuery)
     }
 }
 
-struct CatalogCollectionQuery {
-    catalog: Option<Filter>,
-}
+struct CatalogCollectionQuery;
 
 #[async_trait::async_trait]
 impl MetadataCollectionQuery<Arc<SessionContext>, ErrorHelper> for CatalogCollectionQuery {
-    fn add_filter(&mut self, name: &str, value: Filter) -> Result<(), ErrorHelper> {
-        match name {
-            "catalog" => {
-                self.catalog = Some(value);
-                Ok(())
-            }
-            _ => Err(ErrorHelper::invalid_argument().format(format_args!(
-                "unsupported filter {name} for metadata collection 'catalogs'"
-            ))),
-        }
-    }
-
     fn schema(&self) -> Schema {
         driverbase::meta::schema::CATALOG.clone()
     }
@@ -71,13 +54,13 @@ impl MetadataCollectionQuery<Arc<SessionContext>, ErrorHelper> for CatalogCollec
         vec![
             FilterDescription {
                 name: "catalog".to_string(),
-                filter_type_string: true,
+                data_type: arrow_schema::DataType::Utf8,
                 remarks: Some("The catalog name to filter by".to_string()),
                 ..Default::default()
             },
             FilterDescription {
                 name: "catalog".to_string(),
-                filter_type_string: true,
+                data_type: arrow_schema::DataType::Utf8,
                 is_pattern: true,
                 ..Default::default()
             },
@@ -87,16 +70,33 @@ impl MetadataCollectionQuery<Arc<SessionContext>, ErrorHelper> for CatalogCollec
     async fn execute(
         &self,
         ctx: Arc<SessionContext>,
+        filters: Option<Box<dyn arrow_array::RecordBatchReader + Send>>,
     ) -> Result<Box<dyn RecordBatchReader + Send + 'static>, ErrorHelper> {
         let mut catalogs = ctx.catalog_names();
         catalogs.sort();
 
         let mut catalog_name = arrow_array::builder::StringBuilder::new();
         let mut catalog_remarks = arrow_array::builder::StringBuilder::new();
-        catalog_remarks.append_nulls(catalogs.len());
 
-        for name in catalogs {
-            catalog_name.append_value(name);
+        for filter_set in driverbase::meta::filter::untyped_filter_sets(filters)? {
+            let filter_set = filter_set?;
+            if filter_set.is_empty() {
+                catalog_remarks.append_nulls(catalogs.len());
+                for name in &catalogs {
+                    catalog_name.append_value(name);
+                }
+            } else {
+                // TODO: validate no other filters (or update API to let us list accepted filters)
+                for name in &catalogs {
+                    if let Some(filter) = filter_set.get("catalog") {
+                        if !filter.matches(name) {
+                            continue;
+                        }
+                    }
+                    catalog_name.append_value(name);
+                    catalog_remarks.append_null();
+                }
+            }
         }
 
         let batch = arrow_array::RecordBatch::try_new(
@@ -128,30 +128,14 @@ impl MetadataCollection<Arc<SessionContext>, ErrorHelper> for SchemaCollection {
     }
 
     fn init(&self) -> Box<dyn MetadataCollectionQuery<Arc<SessionContext>, ErrorHelper> + Send> {
-        Box::new(SchemaCollectionQuery::default())
+        Box::new(SchemaCollectionQuery)
     }
 }
 
-#[derive(Default)]
-struct SchemaCollectionQuery {
-    catalog: Option<Filter>,
-    schema: Option<Filter>,
-}
+struct SchemaCollectionQuery;
 
 #[async_trait::async_trait]
 impl MetadataCollectionQuery<Arc<SessionContext>, ErrorHelper> for SchemaCollectionQuery {
-    fn add_filter(&mut self, name: &str, value: Filter) -> Result<(), ErrorHelper> {
-        match name {
-            "schema" => {
-                self.schema = Some(value);
-                Ok(())
-            }
-            _ => Err(ErrorHelper::invalid_argument().format(format_args!(
-                "unsupported filter {name} for metadata collection 'schemas'"
-            ))),
-        }
-    }
-
     fn schema(&self) -> Schema {
         driverbase::meta::schema::SCHEMA.clone()
     }
@@ -160,25 +144,25 @@ impl MetadataCollectionQuery<Arc<SessionContext>, ErrorHelper> for SchemaCollect
         vec![
             FilterDescription {
                 name: "catalog".to_string(),
-                filter_type_string: true,
+                data_type: arrow_schema::DataType::Utf8,
                 remarks: Some("The catalog name to filter by".to_string()),
                 ..Default::default()
             },
             FilterDescription {
                 name: "catalog".to_string(),
-                filter_type_string: true,
+                data_type: arrow_schema::DataType::Utf8,
                 is_pattern: true,
                 ..Default::default()
             },
             FilterDescription {
                 name: "schema".to_string(),
-                filter_type_string: true,
+                data_type: arrow_schema::DataType::Utf8,
                 remarks: Some("The schema name to filter by".to_string()),
                 ..Default::default()
             },
             FilterDescription {
                 name: "schema".to_string(),
-                filter_type_string: true,
+                data_type: arrow_schema::DataType::Utf8,
                 is_pattern: true,
                 ..Default::default()
             },
@@ -188,6 +172,7 @@ impl MetadataCollectionQuery<Arc<SessionContext>, ErrorHelper> for SchemaCollect
     async fn execute(
         &self,
         ctx: Arc<SessionContext>,
+        filters: Option<Box<dyn RecordBatchReader + Send>>,
     ) -> Result<Box<dyn RecordBatchReader + Send + 'static>, ErrorHelper> {
         let mut catalogs = ctx.catalog_names();
         catalogs.sort();
@@ -196,25 +181,27 @@ impl MetadataCollectionQuery<Arc<SessionContext>, ErrorHelper> for SchemaCollect
         let mut schema_name = arrow_array::builder::StringBuilder::new();
         let mut schema_remarks = arrow_array::builder::StringBuilder::new();
 
-        for name in catalogs {
-            if let Some(filter) = &self.catalog {
-                if !filter.matches(&name) {
+        for filter_set in driverbase::meta::filter::untyped_filter_sets(filters)? {
+            let filter_set = filter_set?;
+            let catalog_filter = filter_set.get("catalog");
+            let schema_filter = filter_set.get("schema");
+            for name in &catalogs {
+                if catalog_filter.is_some_and(|filter| !filter.matches(name)) {
                     continue;
                 }
-            }
-            if let Some(catalog) = ctx.catalog(&name) {
-                for schema in catalog.schema_names() {
-                    if let Some(filter) = &self.schema {
-                        if !filter.matches(&schema) {
+                if let Some(catalog) = ctx.catalog(name) {
+                    let mut schemas = catalog.schema_names();
+                    schemas.sort();
+                    for schema in schemas {
+                        if schema_filter.is_some_and(|filter| !filter.matches(&schema)) {
                             continue;
                         }
+                        catalog_name.append_value(name);
+                        schema_name.append_value(&schema);
+                        schema_remarks.append_null();
                     }
-                    catalog_name.append_value(&name);
-                    schema_name.append_value(&schema);
-                    schema_remarks.append_null();
                 }
             }
-            // else TOC/TOU error?
         }
 
         let batch = arrow_array::RecordBatch::try_new(

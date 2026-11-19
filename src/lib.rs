@@ -1263,7 +1263,7 @@ impl Statement for DataFusionStatement {
         if let Some(meta_request) = self.meta.take() {
             return self
                 .runtime
-                .block_on(meta_request.execute(self.ctx.clone()))
+                .block_on(meta_request.execute(self.ctx.clone(), self.bound.take()))
                 .map_err(|e| e.to_adbc());
         }
         if self.ingest.is_set() {
@@ -1428,9 +1428,7 @@ impl Statement for DataFusionStatement {
 
     fn get_parameter_schema(&self) -> adbc_core::error::Result<arrow_schema::Schema> {
         if let Some(meta_request) = self.meta.as_ref() {
-            return Ok(driverbase::meta::get_filter_schema(
-                &meta_request.supported_filters(),
-            ));
+            return Ok(meta_request.filter_schema());
         }
 
         let param_types = match &self.query {
