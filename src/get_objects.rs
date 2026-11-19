@@ -272,6 +272,7 @@ impl GetObjectsImpl<ErrorHelper> for DataFusionGetObjects {
                         ordinal_position: ordinal_positions
                             .is_valid(i)
                             .then(|| ordinal_positions.value(i)),
+                        ..Default::default()
                     });
                 }
             }

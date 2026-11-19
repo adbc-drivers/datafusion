@@ -23,6 +23,7 @@
 mod bind;
 mod catalog;
 mod get_objects;
+mod meta;
 mod object_storage;
 use adbc_core::constants;
 use datafusion::common::TableReference;
@@ -59,6 +60,7 @@ use adbc_core::{
 
 use driverbase::bulk_ingest::BulkIngestState;
 use driverbase::error::ErrorHelper as _;
+use driverbase::meta::MetadataCollectionState;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ErrorHelper {}
@@ -678,6 +680,7 @@ impl Connection for DataFusionConnection {
             query: None,
             bound: None,
             ingest: BulkIngestState::new(),
+            meta: MetadataCollectionState::new(meta::SUPPORTED_METADATA_COLLECTIONS.clone()),
         })
     }
 
@@ -966,6 +969,7 @@ pub struct DataFusionStatement {
     query: Option<QueryState>,
     bound: Option<Box<dyn RecordBatchReader + Send>>,
     ingest: BulkIngestState<ErrorHelper>,
+    meta: MetadataCollectionState<Arc<SessionContext>, ErrorHelper>,
 }
 
 impl Optionable for DataFusionStatement {
@@ -981,6 +985,15 @@ impl Optionable for DataFusionStatement {
             .set_option(&key, &value)
             .map_err(|e| e.to_adbc())?
         {
+            return Ok(());
+        }
+        if self
+            .meta
+            .set_option(&key, &value)
+            .map_err(|e| e.to_adbc())?
+        {
+            self.ingest.clear();
+            self.query = None;
             return Ok(());
         }
         match key.as_ref() {
@@ -1247,6 +1260,21 @@ impl Statement for DataFusionStatement {
     }
 
     fn execute(&mut self) -> Result<Box<dyn RecordBatchReader + Send>> {
+        if let Some(meta_request) = self.meta.take() {
+            return self
+                .runtime
+                .block_on(meta_request.execute(self.ctx.clone(), self.bound.take()))
+                .map_err(|e| e.to_adbc());
+        }
+        if self.ingest.is_set() {
+            self.execute_bulk_ingest()?;
+            return Ok(
+                Box::new(SingleBatchReader::new(RecordBatch::new_empty(Arc::new(
+                    arrow_schema::Schema::empty(),
+                )))) as Box<dyn RecordBatchReader + Send>,
+            );
+        }
+
         if let Some(reader) = self.bound.take() {
             return self.execute_with_params(reader);
         }
@@ -1269,6 +1297,11 @@ impl Statement for DataFusionStatement {
     }
 
     fn execute_update(&mut self) -> adbc_core::error::Result<Option<i64>> {
+        if self.meta.is_set() {
+            return Err(ErrorHelper::invalid_state()
+                .message("metadata collection does not support execute_update")
+                .to_adbc());
+        }
         if self.ingest.is_set() {
             return self.execute_bulk_ingest();
         }
@@ -1293,6 +1326,15 @@ impl Statement for DataFusionStatement {
     }
 
     fn execute_schema(&mut self) -> adbc_core::error::Result<arrow_schema::Schema> {
+        if let Some(meta_request) = self.meta.as_ref() {
+            return Ok(meta_request.schema());
+        }
+        if self.ingest.is_set() {
+            return Err(ErrorHelper::invalid_state()
+                .message("bulk ingest does not support execute_schema")
+                .to_adbc());
+        }
+
         self.runtime.block_on(async {
             match &self.query {
                 Some(QueryState::Sql(query)) => {
@@ -1385,6 +1427,10 @@ impl Statement for DataFusionStatement {
     }
 
     fn get_parameter_schema(&self) -> adbc_core::error::Result<arrow_schema::Schema> {
+        if let Some(meta_request) = self.meta.as_ref() {
+            return Ok(meta_request.filter_schema());
+        }
+
         let param_types = match &self.query {
             Some(QueryState::Prepared(plan)) => plan
                 .get_parameter_types()
