@@ -33,9 +33,12 @@ use datafusion::logical_expr::dml::InsertOp;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 use datafusion::prelude::*;
+#[cfg(feature = "substrait")]
 use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
+#[cfg(feature = "substrait")]
 use datafusion_substrait::substrait::proto::Plan;
 use futures::StreamExt;
+#[cfg(feature = "substrait")]
 use prost::Message;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -821,6 +824,7 @@ impl Connection for DataFusionConnection {
 
 enum QueryState {
     Sql(String),
+    #[cfg(feature = "substrait")]
     Substrait(Plan),
     Prepared(LogicalPlan),
 }
@@ -833,6 +837,7 @@ impl QueryState {
                 .create_logical_plan(query)
                 .await
                 .map_err(ErrorHelper::from_datafusion)?,
+            #[cfg(feature = "substrait")]
             QueryState::Substrait(plan) => from_substrait_plan(&ctx.state(), plan)
                 .await
                 .map_err(ErrorHelper::from_datafusion)?,
@@ -1303,6 +1308,7 @@ impl Statement for DataFusionStatement {
                         .map_err(ErrorHelper::from_datafusion)?;
                     Ok(df.schema().as_arrow().clone())
                 }
+                #[cfg(feature = "substrait")]
                 Some(QueryState::Substrait(plan)) => {
                     let plan = from_substrait_plan(&self.ctx.state(), plan)
                         .await
@@ -1405,6 +1411,7 @@ impl Statement for DataFusionStatement {
                     .map_err(ErrorHelper::from_datafusion)
                     .map_err(|e| e.to_adbc())
             }
+            #[cfg(feature = "substrait")]
             Some(QueryState::Substrait(plan)) => {
                 let logical_plan = self
                     .runtime
@@ -1452,6 +1459,7 @@ impl Statement for DataFusionStatement {
                 })?;
                 self.query = Some(QueryState::Prepared(plan));
             }
+            #[cfg(feature = "substrait")]
             Some(QueryState::Substrait(plan)) => {
                 let logical_plan = self.runtime.block_on(async {
                     from_substrait_plan(&self.ctx.state(), &plan)
@@ -1477,6 +1485,7 @@ impl Statement for DataFusionStatement {
         Ok(())
     }
 
+    #[cfg(feature = "substrait")]
     fn set_substrait_plan(&mut self, plan: impl AsRef<[u8]>) -> adbc_core::error::Result<()> {
         self.query = Some(QueryState::Substrait(Plan::decode(plan.as_ref()).map_err(
             |e| {
@@ -1487,6 +1496,13 @@ impl Statement for DataFusionStatement {
             },
         )?));
         Ok(())
+    }
+
+    #[cfg(not(feature = "substrait"))]
+    fn set_substrait_plan(&mut self, _plan: impl AsRef<[u8]>) -> adbc_core::error::Result<()> {
+        Err(ErrorHelper::not_implemented()
+            .message("Substrait plans need the `substrait` feature")
+            .to_adbc())
     }
 
     fn cancel(&mut self) -> adbc_core::error::Result<()> {
